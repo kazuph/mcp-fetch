@@ -1,4 +1,5 @@
 # MCP Fetch
+[![smithery badge](https://smithery.ai/badge/@kazuph/mcp-fetch)](https://smithery.ai/server/@kazuph/mcp-fetch)
 
 Model Context Protocol server for fetching web content and processing images. This allows Claude Desktop (or any MCP client) to fetch web content and handle images appropriately.
 
@@ -45,6 +46,15 @@ The following sections are for those who want to develop or modify the tool.
 
 ## Installation
 
+### Installing via Smithery
+
+To install MCP Fetch for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@kazuph/mcp-fetch):
+
+```bash
+npx -y @smithery/cli install @kazuph/mcp-fetch --client claude
+```
+
+### Installing Manually
 ```bash
 git clone https://github.com/kazuph/mcp-fetch.git
 cd mcp-fetch
