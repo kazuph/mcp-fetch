@@ -32,6 +32,14 @@ This will automatically download and run the latest version of the tool when nee
 
 This accessibility setting is required for automated clipboard operations (Cmd+V) to work properly.
 
+## Features
+
+- **Web Content Extraction**: Automatically extracts and formats web content as markdown
+- **Image Processing**: Processes images from web pages and optimizes them
+- **Pagination Support**: Supports pagination for both text and images
+- **JPEG Optimization**: Automatically optimizes images as JPEG for better performance
+- **GIF Support**: Extracts first frame from animated GIFs
+
 ## For Developers
 
 The following sections are for those who want to develop or modify the tool.
@@ -54,13 +62,13 @@ npm run build
 
 ## Image Processing Specifications
 
-When processing images from web content, the following limits are applied:
+When processing images from web content, the following optimizations are applied:
 
-- Maximum 6 images per group
-- Maximum height of 8000 pixels per group
-- Maximum size of 30MB per group
-
-If content exceeds these limits, images will be automatically split into multiple groups, and you'll need to paste (Cmd+V) multiple times.
+- Images are converted to JPEG format with quality control
+- Maximum width limited to 1200px by default
+- Maximum height limited to 1600px by default
+- Chroma subsampling (4:2:0) for better compression
+- MozJPEG optimization for smaller file sizes
 
 ## Configuration
 
@@ -94,9 +102,19 @@ Add the following to your MCP client's configuration:
 }
 ```
 
-## Available Tools
+## Available Parameters
 
-- `fetch`: Retrieves URLs from the Internet and extracts their content as markdown. Images are automatically processed and prepared for clipboard operations.
+- `url` (required): The URL to fetch
+- `maxLength` (default: 20000): Maximum length of content to return
+- `startIndex` (default: 0): Starting position in content
+- `imageStartIndex` (default: 0): Starting position for image collection
+- `raw` (default: false): Return raw content instead of processed markdown
+- `imageMaxCount` (default: 3): Maximum number of images to process per request
+- `imageMaxHeight` (default: 4000): Maximum height of merged image
+- `imageMaxWidth` (default: 1000): Maximum width of merged image
+- `imageQuality` (default: 80): JPEG quality (1-100)
+- `disableImages` (default: false): Skip image processing
+- `ignoreRobotsTxt` (default: false): Ignore robots.txt restrictions
 
 ## Notes
 
