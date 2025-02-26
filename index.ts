@@ -24,6 +24,7 @@ interface Image {
 interface ExtractedContent {
   markdown: string;
   images: Image[];
+  title?: string;
 }
 
 const DEFAULT_USER_AGENT_AUTONOMOUS =
@@ -130,7 +131,7 @@ function extractContentFromHtml(
   });
   const markdown = turndownService.turndown(article.content);
 
-  return { markdown, images };
+  return { markdown, images, title: article.title };
 }
 
 async function fetchImages(
@@ -295,6 +296,7 @@ interface FetchResult {
   images: { data: string; mimeType: string }[];
   remainingContent: number;
   remainingImages: number;
+  title?: string;
 }
 
 async function fetchUrl(
@@ -336,7 +338,7 @@ async function fetchUrl(
       };
     }
 
-    const { markdown, images } = result;
+    const { markdown, images, title } = result;
     const processedImages = [];
 
     if (
@@ -394,6 +396,7 @@ async function fetchUrl(
         0,
         images.length - (options.imageStartIndex + options.imageMaxCount)
       ),
+      title,
     };
   }
 
@@ -402,6 +405,7 @@ async function fetchUrl(
     images: [],
     remainingContent: 0,
     remainingImages: 0,
+    title: undefined,
   };
 }
 
@@ -485,6 +489,11 @@ Examples:
   }
 );
 
+// MCPレスポンスの型定義
+type MCPResponseContent =
+  | { type: "text"; text: string }
+  | { type: "image"; mimeType: string; data: string };
+
 server.setRequestHandler(
   CallToolSchema,
   async (
@@ -511,7 +520,7 @@ server.setRequestHandler(
         await checkRobotsTxt(parsed.data.url, DEFAULT_USER_AGENT_AUTONOMOUS);
       }
 
-      const { content, images, remainingContent, remainingImages } =
+      const { content, images, remainingContent, remainingImages, title } =
         await fetchUrl(
           parsed.data.url,
           DEFAULT_USER_AGENT_AUTONOMOUS,
@@ -551,10 +560,10 @@ server.setRequestHandler(
       }
 
       // MCP レスポンスの作成
-      const responseContent = [
+      const responseContent: MCPResponseContent[] = [
         {
           type: "text",
-          text: `Contents of ${parsed.data.url}:\n${finalContent}`,
+          text: `Contents of ${parsed.data.url}${title ? `: ${title}` : ""}:\n${finalContent}`,
         },
       ];
 
@@ -564,7 +573,7 @@ server.setRequestHandler(
           type: "image",
           mimeType: image.mimeType,
           data: image.data,
-        } as any); // 型アサーションを追加
+        });
       }
 
       return {

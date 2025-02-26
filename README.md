@@ -35,6 +35,7 @@ This accessibility setting is required for automated clipboard operations (Cmd+V
 ## Features
 
 - **Web Content Extraction**: Automatically extracts and formats web content as markdown
+- **Article Title Extraction**: Extracts and displays the title of the article
 - **Image Processing**: Processes images from web pages and optimizes them
 - **Pagination Support**: Supports pagination for both text and images
 - **JPEG Optimization**: Automatically optimizes images as JPEG for better performance
@@ -122,3 +123,16 @@ Add the following to your MCP client's configuration:
 - Images are processed using Sharp for optimal performance and quality.
 - When multiple images are found, they are merged vertically with consideration for size limits.
 - Animated GIFs are automatically handled by extracting their first frame.
+
+## Changelog
+
+### v1.1.0
+- Added article title extraction feature
+- Improved response formatting to include article titles
+- Fixed type issues with MCP response content
+
+### v1.0.0
+- Initial release
+- Web content extraction
+- Image processing and optimization
+- Pagination support
