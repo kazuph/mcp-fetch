@@ -57,6 +57,6 @@
 	},
 	"homepage": "https://github.com/kazuph/mcp-fetch#readme",
 	"bin": {
-		"mcp-fetch": "./dist/index.js"
+		"mcp-fetch": "dist/index.js"
 	}
 }
