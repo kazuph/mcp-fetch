@@ -1,6 +1,6 @@
 {
 	"name": "@kazuph/mcp-fetch",
-	"version": "0.8.4",
+	"version": "1.0.0",
 	"type": "module",
 	"description": "A Model Context Protocol server that provides web content fetching capabilities",
 	"main": "dist/index.js",

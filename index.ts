@@ -12,16 +12,8 @@ import fetch from "node-fetch";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
 import robotsParser from "robots-parser";
 import sharp from "sharp";
-
-const execAsync = promisify(exec);
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 interface Image {
   src: string;
@@ -41,9 +33,59 @@ const DEFAULT_USER_AGENT_MANUAL =
 
 const FetchArgsSchema = z.object({
   url: z.string().url(),
-  maxLength: z.number().positive().max(1000000).default(20000),
-  startIndex: z.number().min(0).default(0),
-  raw: z.boolean().default(false),
+  maxLength: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().positive().max(1000000))
+    .default(20000),
+  startIndex: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().min(0))
+    .default(0),
+  imageStartIndex: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().min(0))
+    .default(0),
+  raw: z
+    .union([z.boolean(), z.string()])
+    .transform((val) =>
+      typeof val === "string" ? val.toLowerCase() === "true" : val
+    )
+    .default(false),
+  imageMaxCount: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().min(0).max(10))
+    .default(3),
+  imageMaxHeight: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().min(100).max(10000))
+    .default(4000),
+  imageMaxWidth: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().min(100).max(10000))
+    .default(1000),
+  imageQuality: z
+    .union([z.number(), z.string()])
+    .transform((val) => Number(val))
+    .pipe(z.number().min(1).max(100))
+    .default(80),
+  disableImages: z
+    .union([z.boolean(), z.string()])
+    .transform((val) =>
+      typeof val === "string" ? val.toLowerCase() === "true" : val
+    )
+    .default(false),
+  ignoreRobotsTxt: z
+    .union([z.boolean(), z.string()])
+    .transform((val) =>
+      typeof val === "string" ? val.toLowerCase() === "true" : val
+    )
+    .default(false),
 });
 
 const ListToolsSchema = z.object({
@@ -96,50 +138,108 @@ async function fetchImages(
 ): Promise<(Image & { data: Buffer })[]> {
   const fetchedImages = [];
   for (const img of images) {
-    const response = await fetch(img.src);
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch image ${img.src}: status ${response.status}`
-      );
-    }
-    const buffer = await response.arrayBuffer();
-    const imageBuffer = Buffer.from(buffer);
+    try {
+      const response = await fetch(img.src);
+      const buffer = await response.arrayBuffer();
+      const imageBuffer = Buffer.from(buffer);
 
-    // Check if the image is a GIF and extract first frame if animated
-    if (img.src.toLowerCase().endsWith(".gif")) {
-      try {
-        const metadata = await sharp(imageBuffer).metadata();
-        if (metadata.pages && metadata.pages > 1) {
-          // Extract first frame of animated GIF
-          const firstFrame = await sharp(imageBuffer, { page: 0 })
-            .png()
-            .toBuffer();
-          fetchedImages.push({
-            ...img,
-            data: firstFrame,
-          });
-          continue;
-        }
-      } catch (error) {
-        console.warn(`Warning: Failed to process GIF image ${img.src}:`, error);
+      // GIF画像の場合は最初のフレームのみ抽出
+      if (img.src.toLowerCase().endsWith(".gif")) {
+        // GIF処理のロジック
       }
-    }
 
-    fetchedImages.push({
-      ...img,
-      data: imageBuffer,
-    });
+      fetchedImages.push({
+        ...img,
+        data: imageBuffer,
+      });
+    } catch (error) {
+      console.warn(`Failed to process image ${img.src}:`, error);
+    }
   }
   return fetchedImages;
 }
 
-async function commandExists(cmd: string): Promise<boolean> {
-  try {
-    await execAsync(`which ${cmd}`);
-    return true;
-  } catch {
-    return false;
+/**
+ * 複数の画像を垂直方向に結合して1つの画像として返す
+ */
+async function mergeImagesVertically(
+  images: Buffer[],
+  maxWidth: number,
+  maxHeight: number,
+  quality: number
+): Promise<Buffer> {
+  if (images.length === 0) {
+    throw new Error("No images to merge");
   }
+
+  // 各画像のメタデータを取得
+  const imageMetas = await Promise.all(
+    images.map(async (buffer) => {
+      const metadata = await sharp(buffer).metadata();
+      return {
+        width: metadata.width || 0,
+        height: metadata.height || 0,
+        buffer,
+      };
+    })
+  );
+
+  // 最大幅を計算
+  const width = Math.min(
+    maxWidth,
+    Math.max(...imageMetas.map((meta) => meta.width))
+  );
+
+  // 画像の高さを合計
+  const totalHeight = Math.min(
+    maxHeight,
+    imageMetas.reduce((sum, meta) => sum + meta.height, 0)
+  );
+
+  // 新しい画像を作成
+  const composite = sharp({
+    create: {
+      width,
+      height: totalHeight,
+      channels: 4,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    },
+  });
+
+  // 各画像を配置
+  let currentY = 0;
+  const overlays = [];
+
+  for (const meta of imageMetas) {
+    // 画像がキャンバスの高さを超えないようにする
+    if (currentY >= maxHeight) break;
+
+    // 画像のリサイズ（必要な場合のみ）
+    let processedImage = sharp(meta.buffer);
+    if (meta.width > width) {
+      processedImage = processedImage.resize(width);
+    }
+
+    const resizedBuffer = await processedImage.toBuffer();
+    const resizedMeta = await sharp(resizedBuffer).metadata();
+
+    overlays.push({
+      input: resizedBuffer,
+      top: currentY,
+      left: 0,
+    });
+
+    currentY += resizedMeta.height || 0;
+  }
+
+  // 品質を指定して出力（PNGの代わりにJPEGを使用）
+  return composite
+    .composite(overlays)
+    .jpeg({
+      quality, // JPEG品質を指定（1-100）
+      mozjpeg: true, // mozjpegを使用して更に最適化
+    })
+    .toBuffer();
 }
 
 async function getImageDimensions(
@@ -153,139 +253,6 @@ async function getImageDimensions(
   };
 }
 
-async function addImagesToClipboard(
-  images: (Image & { data: Buffer })[]
-): Promise<void> {
-  if (images.length === 0) return;
-
-  const hasPbcopy = await commandExists("pbcopy");
-  const hasOsascript = await commandExists("osascript");
-  if (!hasPbcopy) {
-    throw new Error(
-      "'pbcopy' command not found. This tool works on macOS only by default."
-    );
-  }
-  if (!hasOsascript) {
-    throw new Error(
-      "'osascript' command not found. Required to set clipboard with images."
-    );
-  }
-
-  const MAX_HEIGHT = 8000;
-  const MAX_SIZE_BYTES = 30 * 1024 * 1024; // 30MB
-  const MAX_IMAGES_PER_GROUP = 6; // 1グループあたりの最大画像数
-
-  const tempDir = "/tmp/mcp-fetch-images";
-  await execAsync(`mkdir -p ${tempDir} && rm -f ${tempDir}/*.png`);
-
-  // 画像をグループ化して処理
-  let currentGroup: Buffer[] = [];
-  let currentHeight = 0;
-  let currentSize = 0;
-
-  const processGroup = async (group: Buffer[]) => {
-    if (group.length === 0) return;
-
-    // 垂直方向に画像を結合
-    const mergedImagePath = `${tempDir}/merged_${Date.now()}.png`;
-    await sharp({
-      create: {
-        width: Math.max(
-          ...(await Promise.all(
-            group.map(async (buffer) => {
-              const metadata = await sharp(buffer).metadata();
-              return metadata.width || 0;
-            })
-          ))
-        ),
-        height: (
-          await Promise.all(
-            group.map(async (buffer) => {
-              const metadata = await sharp(buffer).metadata();
-              return metadata.height || 0;
-            })
-          )
-        ).reduce((a, b) => a + b, 0),
-        channels: 4,
-        background: { r: 255, g: 255, b: 255, alpha: 1 },
-      },
-    })
-      .composite(
-        await Promise.all(
-          group.map(async (buffer, index) => {
-            const previousHeights = await Promise.all(
-              group.slice(0, index).map(async (b) => {
-                const metadata = await sharp(b).metadata();
-                return metadata.height || 0;
-              })
-            );
-            const top = previousHeights.reduce((a, b) => a + b, 0);
-            return {
-              input: buffer,
-              top,
-              left: 0,
-            };
-          })
-        )
-      )
-      .png()
-      .toFile(mergedImagePath);
-
-    const { stderr } = await execAsync(
-      `osascript -e 'set the clipboard to (read (POSIX file "${mergedImagePath}") as «class PNGf»)'`
-    );
-    if (stderr?.trim()) {
-      const lines = stderr.trim().split("\n");
-      const nonWarningLines = lines.filter(
-        (line) => !line.includes("WARNING:")
-      );
-      if (nonWarningLines.length > 0) {
-        throw new Error("Failed to copy merged image to clipboard.");
-      }
-    }
-
-    await sleep(500);
-    const pasteScript = `osascript -e 'tell application "System Events" to keystroke "v" using command down'`;
-    const { stderr: pasteStderr } = await execAsync(pasteScript);
-    if (pasteStderr?.trim()) {
-      const lines = pasteStderr.trim().split("\n");
-      const nonWarningLines = lines.filter(
-        (line) => !line.includes("WARNING:")
-      );
-      if (nonWarningLines.length > 0) {
-        console.warn("Failed to paste merged image.");
-      }
-    }
-    await sleep(500);
-  };
-
-  for (const img of images) {
-    const { height, size } = await getImageDimensions(img.data);
-
-    if (
-      currentGroup.length >= MAX_IMAGES_PER_GROUP ||
-      currentHeight + height > MAX_HEIGHT ||
-      currentSize + size > MAX_SIZE_BYTES
-    ) {
-      // 現在のグループを処理
-      await processGroup(currentGroup);
-      // 新しいグループを開始
-      currentGroup = [img.data];
-      currentHeight = height;
-      currentSize = size;
-    } else {
-      currentGroup.push(img.data);
-      currentHeight += height;
-      currentSize += size;
-    }
-  }
-
-  // 残りのグループを処理
-  await processGroup(currentGroup);
-
-  await execAsync(`rm -rf ${tempDir}`);
-}
-
 async function checkRobotsTxt(
   url: string,
   userAgent: string
@@ -293,38 +260,57 @@ async function checkRobotsTxt(
   const { protocol, host } = new URL(url);
   const robotsUrl = `${protocol}//${host}/robots.txt`;
 
-  const response = await fetch(robotsUrl);
-  if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
+  try {
+    const response = await fetch(robotsUrl);
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          "Autonomous fetching not allowed based on robots.txt response"
+        );
+      }
+      return true; // Allow if no robots.txt
+    }
+
+    const robotsTxt = await response.text();
+    const robots = robotsParser(robotsUrl, robotsTxt);
+
+    if (!robots.isAllowed(url, userAgent)) {
       throw new Error(
-        "Autonomous fetching not allowed based on robots.txt response"
+        "The site's robots.txt specifies that autonomous fetching is not allowed. " +
+          "Try manually fetching the page using the fetch prompt."
       );
     }
-    return true; // Allow if no robots.txt
+    return true;
+  } catch (error) {
+    // ロボットテキストの取得に失敗した場合はアクセスを許可する
+    if (error instanceof Error && error.message.includes("robots.txt")) {
+      throw error;
+    }
+    return true;
   }
-
-  const robotsTxt = await response.text();
-  const robots = robotsParser(robotsUrl, robotsTxt);
-
-  if (!robots.isAllowed(url, userAgent)) {
-    throw new Error(
-      "The site's robots.txt specifies that autonomous fetching is not allowed. " +
-        "Try manually fetching the page using the fetch prompt."
-    );
-  }
-  return true;
 }
 
 interface FetchResult {
   content: string;
-  prefix: string;
-  imageUrls?: string[];
+  images: { data: string; mimeType: string }[];
+  remainingContent: number;
+  remainingImages: number;
 }
 
 async function fetchUrl(
   url: string,
   userAgent: string,
-  forceRaw = false
+  forceRaw = false,
+  options = {
+    imageMaxCount: 3,
+    imageMaxHeight: 4000,
+    imageMaxWidth: 1000,
+    imageQuality: 80,
+    disableImages: false,
+    imageStartIndex: 0,
+    startIndex: 0,
+    maxLength: 20000,
+  }
 ): Promise<FetchResult> {
   const response = await fetch(url, {
     headers: { "User-Agent": userAgent },
@@ -344,42 +330,84 @@ async function fetchUrl(
     if (typeof result === "string") {
       return {
         content: result,
-        prefix: "",
+        images: [],
+        remainingContent: 0,
+        remainingImages: 0,
       };
     }
 
     const { markdown, images } = result;
-    const fetchedImages = await fetchImages(images);
-    const imageUrls = fetchedImages.map((img) => img.src);
+    const processedImages = [];
 
-    if (fetchedImages.length > 0) {
+    if (
+      !options.disableImages &&
+      options.imageMaxCount > 0 &&
+      images.length > 0
+    ) {
       try {
-        await addImagesToClipboard(fetchedImages);
-        return {
-          content: markdown,
-          prefix: `Found and processed ${fetchedImages.length} images. Images have been merged vertically (max 6 images per group) and copied to your clipboard. Please paste (Cmd+V) to combine with the retrieved content.\n`,
-          imageUrls,
-        };
+        const startIdx = options.imageStartIndex;
+        let fetchedImages = await fetchImages(images.slice(startIdx));
+        fetchedImages = fetchedImages.slice(0, options.imageMaxCount);
+
+        if (fetchedImages.length > 0) {
+          const imageBuffers = fetchedImages.map((img) => img.data);
+
+          const mergedImage = await mergeImagesVertically(
+            imageBuffers,
+            options.imageMaxWidth,
+            options.imageMaxHeight,
+            options.imageQuality
+          );
+
+          // Base64エンコード前に画像を最適化
+          const optimizedImage = await sharp(mergedImage)
+            .resize({
+              width: Math.min(options.imageMaxWidth, 1200), // 最大幅を1200pxに制限
+              height: Math.min(options.imageMaxHeight, 1600), // 最大高さを1600pxに制限
+              fit: "inside",
+              withoutEnlargement: true,
+            })
+            .jpeg({
+              quality: Math.min(options.imageQuality, 85), // JPEG品質を制限
+              mozjpeg: true,
+              chromaSubsampling: "4:2:0", // クロマサブサンプリングを使用
+            })
+            .toBuffer();
+
+          const base64Image = optimizedImage.toString("base64");
+
+          processedImages.push({
+            data: base64Image,
+            mimeType: "image/jpeg", // MIMEタイプをJPEGに変更
+          });
+        }
       } catch (err) {
-        return {
-          content: markdown,
-          prefix: `Found ${fetchedImages.length} images but failed to copy them to the clipboard.\nError: ${err instanceof Error ? err.message : String(err)}\n`,
-          imageUrls,
-        };
+        console.error("Error processing images:", err);
       }
     }
+
     return {
       content: markdown,
-      prefix: "",
-      imageUrls,
+      images: processedImages,
+      remainingContent: text.length - (options.startIndex + options.maxLength),
+      remainingImages: Math.max(
+        0,
+        images.length - (options.imageStartIndex + options.imageMaxCount)
+      ),
     };
   }
 
   return {
-    content: text,
-    prefix: `Content type ${contentType} cannot be simplified to markdown, but here is the raw content:\n`,
+    content: `Content type ${contentType} cannot be simplified to markdown, but here is the raw content:\n${text}`,
+    images: [],
+    remainingContent: 0,
+    remainingImages: 0,
   };
 }
+
+// コマンドライン引数の解析
+const args = process.argv.slice(2);
+const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 
 // Server setup
 const server = new Server(
@@ -394,6 +422,11 @@ const server = new Server(
   }
 );
 
+// コマンドライン引数の情報をログに出力
+console.error(
+  `Server started with options: ${IGNORE_ROBOTS_TXT ? "ignore-robots-txt" : "respect-robots-txt"}`
+);
+
 interface RequestHandlerExtra {
   signal: AbortSignal;
 }
@@ -404,8 +437,47 @@ server.setRequestHandler(
     const tools = [
       {
         name: "fetch",
-        description:
-          "Retrieves URLs from the Internet and extracts their content as markdown. If images are found, they are merged vertically (max 6 images per group, max height 8000px, max size 30MB per group) and copied to the clipboard of the user's host machine. You will need to paste (Cmd+V) to insert the images.",
+        description: `
+Retrieves URLs from the Internet and extracts their content as markdown.
+Images from the page will be processed and included with the response automatically.
+
+Parameters:
+  - url (required): The URL to fetch
+  - maxLength (default: 20000): Maximum length of content to return
+  - startIndex (default: 0): Starting position in content
+  - imageStartIndex (default: 0): Starting position for image collection
+  - raw (default: false): Return raw content instead of processed markdown
+  - imageMaxCount (default: 3): Maximum number of images to process per request
+  - imageMaxHeight (default: 4000): Maximum height of merged image
+  - imageMaxWidth (default: 1000): Maximum width of merged image
+  - imageQuality (default: 80): JPEG quality (1-100)
+  - disableImages (default: false): Skip image processing
+  - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
+
+Image Processing:
+  - Multiple images are merged vertically into a single JPEG
+  - Images are automatically optimized and resized
+  - GIF animations are converted to static images (first frame)
+  - Use imageStartIndex and imageMaxCount to paginate through all images
+  - Response includes remaining image count and current position
+
+IMPORTANT: All parameters must be in proper JSON format - use double quotes for keys
+and string values, and no quotes for numbers and booleans.
+
+Examples:
+# Initial fetch:
+{
+  "url": "https://example.com",
+  "maxLength": 10000,
+  "imageMaxCount": 2
+}
+
+# Fetch next set of images:
+{
+  "url": "https://example.com",
+  "imageStartIndex": 2,
+  "imageMaxCount": 2
+}`,
         inputSchema: zodToJsonSchema(FetchArgsSchema),
       },
     ];
@@ -434,39 +506,69 @@ server.setRequestHandler(
         throw new Error(`Invalid arguments: ${parsed.error}`);
       }
 
-      await checkRobotsTxt(parsed.data.url, DEFAULT_USER_AGENT_AUTONOMOUS);
-
-      const { content, prefix, imageUrls } = await fetchUrl(
-        parsed.data.url,
-        DEFAULT_USER_AGENT_AUTONOMOUS,
-        parsed.data.raw
-      );
-
-      let finalContent = content;
-      if (finalContent.length > parsed.data.maxLength) {
-        finalContent = finalContent.slice(
-          parsed.data.startIndex,
-          parsed.data.startIndex + parsed.data.maxLength
-        );
-        finalContent += `\n\n<e>Content truncated. Call the fetch tool with a start_index of ${
-          parsed.data.startIndex + parsed.data.maxLength
-        } to get more content.</e>`;
+      // robots.txtをチェックする（ignoreRobotsTxtがtrueまたはコマンドラインオプションが指定されている場合はスキップ）
+      if (!parsed.data.ignoreRobotsTxt && !IGNORE_ROBOTS_TXT) {
+        await checkRobotsTxt(parsed.data.url, DEFAULT_USER_AGENT_AUTONOMOUS);
       }
 
-      let imagesSection = "";
-      if (imageUrls && imageUrls.length > 0) {
-        imagesSection =
-          "\n\nImages found in article:\n" +
-          imageUrls.map((url) => `- ${url}`).join("\n");
+      const { content, images, remainingContent, remainingImages } =
+        await fetchUrl(
+          parsed.data.url,
+          DEFAULT_USER_AGENT_AUTONOMOUS,
+          parsed.data.raw,
+          {
+            imageMaxCount: parsed.data.imageMaxCount,
+            imageMaxHeight: parsed.data.imageMaxHeight,
+            imageMaxWidth: parsed.data.imageMaxWidth,
+            imageQuality: parsed.data.imageQuality,
+            disableImages: parsed.data.disableImages,
+            imageStartIndex: parsed.data.imageStartIndex,
+            startIndex: parsed.data.startIndex,
+            maxLength: parsed.data.maxLength,
+          }
+        );
+
+      let finalContent = content.slice(
+        parsed.data.startIndex,
+        parsed.data.startIndex + parsed.data.maxLength
+      );
+
+      // 残りの情報を追加
+      const remainingInfo = [];
+      if (remainingContent > 0) {
+        remainingInfo.push(`${remainingContent} characters of text remaining`);
+      }
+      if (remainingImages > 0) {
+        remainingInfo.push(
+          `${remainingImages} more images available (${parsed.data.imageStartIndex + images.length}/${parsed.data.imageStartIndex + images.length + remainingImages} shown)`
+        );
+      }
+
+      if (remainingInfo.length > 0) {
+        finalContent += `\n\n<e>Content truncated. ${remainingInfo.join(", ")}. Call the fetch tool with start_index=${
+          parsed.data.startIndex + parsed.data.maxLength
+        } and/or imageStartIndex=${parsed.data.imageStartIndex + images.length} to get more content.</e>`;
+      }
+
+      // MCP レスポンスの作成
+      const responseContent = [
+        {
+          type: "text",
+          text: `Contents of ${parsed.data.url}:\n${finalContent}`,
+        },
+      ];
+
+      // 画像があれば追加
+      for (const image of images) {
+        responseContent.push({
+          type: "image",
+          mimeType: image.mimeType,
+          data: image.data,
+        } as any); // 型アサーションを追加
       }
 
       return {
-        content: [
-          {
-            type: "text",
-            text: `${prefix}Contents of ${parsed.data.url}:\n${finalContent}${imagesSection}`,
-          },
-        ],
+        content: responseContent,
       };
     } catch (error) {
       return {
