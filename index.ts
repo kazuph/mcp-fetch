@@ -458,6 +458,10 @@ Parameters:
   - disableImages (default: false): Skip image processing
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
 
+AI Assistant Usage:
+  - If you are using Claude: You can retrieve images directly
+  - If you are using Cursor or Cline: Set disableImages: true as these clients don't support MCP image retrieval
+
 Image Processing:
   - Multiple images are merged vertically into a single JPEG
   - Images are automatically optimized and resized
