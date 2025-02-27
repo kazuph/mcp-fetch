@@ -80,7 +80,7 @@ const FetchArgsSchema = z.object({
     .transform((val) =>
       typeof val === "string" ? val.toLowerCase() === "true" : val
     )
-    .default(false),
+    .default(true),
   ignoreRobotsTxt: z
     .union([z.boolean(), z.string()])
     .transform((val) =>
@@ -308,7 +308,7 @@ async function fetchUrl(
     imageMaxHeight: 4000,
     imageMaxWidth: 1000,
     imageQuality: 80,
-    disableImages: false,
+    disableImages: true,
     imageStartIndex: 0,
     startIndex: 0,
     maxLength: 20000,
@@ -455,12 +455,8 @@ Parameters:
   - imageMaxHeight (default: 4000): Maximum height of merged image
   - imageMaxWidth (default: 1000): Maximum width of merged image
   - imageQuality (default: 80): JPEG quality (1-100)
-  - disableImages (default: false): Skip image processing
+  - disableImages (default: true): Skip image processing
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
-
-AI Assistant Usage:
-  - If you are using Claude: You can retrieve images directly
-  - If you are using Cursor or Cline: Set disableImages: true as these clients don't support MCP image retrieval
 
 Image Processing:
   - Multiple images are merged vertically into a single JPEG
