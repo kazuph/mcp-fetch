@@ -36,7 +36,7 @@ This accessibility setting is required for automated clipboard operations (Cmd+V
 
 - **Web Content Extraction**: Automatically extracts and formats web content as markdown
 - **Article Title Extraction**: Extracts and displays the title of the article
-- **Image Processing**: Processes images from web pages and optimizes them
+- **Image Processing**: Optional processing of images from web pages with optimization (disabled by default, enable with `enableFetchImages: true`)
 - **Pagination Support**: Supports pagination for both text and images
 - **JPEG Optimization**: Automatically optimizes images as JPEG for better performance
 - **GIF Support**: Extracts first frame from animated GIFs
@@ -114,8 +114,36 @@ Add the following to your MCP client's configuration:
 - `imageMaxHeight` (default: 4000): Maximum height of merged image
 - `imageMaxWidth` (default: 1000): Maximum width of merged image
 - `imageQuality` (default: 80): JPEG quality (1-100)
-- `disableImages` (default: false): Skip image processing
+- `enableFetchImages` (default: false): Enable fetching and processing of images. FOR CLAUDE USERS ONLY: YOU ARE ALLOWED TO ENABLE THIS FEATURE!!! CLAUDE CAN FETCH AND PROCESS IMAGES!!! ENJOY THIS CAPABILITY!!!!!
 - `ignoreRobotsTxt` (default: false): Ignore robots.txt restrictions
+
+## Examples
+
+### Basic Content Fetching (No Images)
+```json
+{
+  "url": "https://example.com"
+}
+```
+
+### Fetching with Images Enabled
+```json
+{
+  "url": "https://example.com",
+  "enableFetchImages": true,
+  "imageMaxCount": 3
+}
+```
+
+### Paginating Through Images
+```json
+{
+  "url": "https://example.com",
+  "enableFetchImages": true,
+  "imageStartIndex": 3,
+  "imageMaxCount": 3
+}
+```
 
 ## Notes
 
@@ -125,6 +153,10 @@ Add the following to your MCP client's configuration:
 - Animated GIFs are automatically handled by extracting their first frame.
 
 ## Changelog
+
+### v1.1.3
+- Changed default behavior: Images are not fetched by default (`enableFetchImages: false`)
+- Removed `disableImages` in favor of `enableFetchImages` parameter
 
 ### v1.1.0
 - Added article title extraction feature

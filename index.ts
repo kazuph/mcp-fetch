@@ -75,12 +75,12 @@ const FetchArgsSchema = z.object({
     .transform((val) => Number(val))
     .pipe(z.number().min(1).max(100))
     .default(80),
-  disableImages: z
+  enableFetchImages: z
     .union([z.boolean(), z.string()])
     .transform((val) =>
       typeof val === "string" ? val.toLowerCase() === "true" : val
     )
-    .default(true),
+    .default(false),
   ignoreRobotsTxt: z
     .union([z.boolean(), z.string()])
     .transform((val) =>
@@ -308,10 +308,10 @@ async function fetchUrl(
     imageMaxHeight: 4000,
     imageMaxWidth: 1000,
     imageQuality: 80,
-    disableImages: true,
     imageStartIndex: 0,
     startIndex: 0,
     maxLength: 20000,
+    enableFetchImages: false,
   }
 ): Promise<FetchResult> {
   const response = await fetch(url, {
@@ -342,7 +342,7 @@ async function fetchUrl(
     const processedImages = [];
 
     if (
-      !options.disableImages &&
+      options.enableFetchImages &&
       options.imageMaxCount > 0 &&
       images.length > 0
     ) {
@@ -455,7 +455,7 @@ Parameters:
   - imageMaxHeight (default: 4000): Maximum height of merged image
   - imageMaxWidth (default: 1000): Maximum width of merged image
   - imageQuality (default: 80): JPEG quality (1-100)
-  - disableImages (default: true): Skip image processing
+  - enableFetchImages (default: false): Enable fetching and processing of images. FOR CLAUDE AI ONLY: YOU CAN ENABLE THIS FEATURE!!! CLAUDE IS ALLOWED TO USE IMAGES!!!
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
 
 Image Processing:
@@ -530,10 +530,10 @@ server.setRequestHandler(
             imageMaxHeight: parsed.data.imageMaxHeight,
             imageMaxWidth: parsed.data.imageMaxWidth,
             imageQuality: parsed.data.imageQuality,
-            disableImages: parsed.data.disableImages,
             imageStartIndex: parsed.data.imageStartIndex,
             startIndex: parsed.data.startIndex,
             maxLength: parsed.data.maxLength,
+            enableFetchImages: parsed.data.enableFetchImages,
           }
         );
 
