@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type {
   CallToolRequest,
   ListToolsRequest,
+  ListResourcesRequest,
+  ReadResourceRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -29,6 +31,17 @@ interface ExtractedContent {
   images: Image[];
   title?: string;
 }
+
+interface ImageResource {
+  uri: string;
+  name: string;
+  description: string;
+  mimeType: string;
+  filePath: string;
+}
+
+// Global resource registry for images
+const imageResources = new Map<string, ImageResource>();
 
 const DEFAULT_USER_AGENT_AUTONOMOUS =
   "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)";
@@ -302,6 +315,56 @@ async function saveImageToFile(
   return filePath;
 }
 
+/**
+ * 個別画像を保存してリソースとして登録
+ */
+async function saveIndividualImageAndRegisterResource(
+  imageBuffer: Buffer,
+  sourceUrl: string,
+  imageIndex: number,
+  altText: string = ''
+): Promise<string> {
+  // 現在の日付をYYYY-MM-DD形式で取得
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  
+  // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr);
+  
+  // ディレクトリが存在しない場合は作成
+  await fs.mkdir(baseDir, { recursive: true });
+  
+  // ファイル名を生成（URLのホスト名 + タイムスタンプ + インデックス）
+  const urlObj = new URL(sourceUrl);
+  const hostname = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_');
+  const timestamp = now.toISOString().replace(/[:.]/g, '-').split('T')[1].split('.')[0];
+  const filename = `${hostname}_${timestamp}_individual_${imageIndex}.jpg`;
+  
+  const filePath = path.join(baseDir, filename);
+  
+  // ファイルに保存
+  await fs.writeFile(filePath, imageBuffer);
+  
+  // リソースとして登録
+  const resourceUri = `file://${filePath}`;
+  const resourceName = `${hostname}_image_${imageIndex}`;
+  const description = `Image ${imageIndex + 1} from ${sourceUrl}${altText ? ` (${altText})` : ''}`;
+  
+  const resource: ImageResource = {
+    uri: resourceUri,
+    name: resourceName,
+    description,
+    mimeType: 'image/jpeg',
+    filePath
+  };
+  
+  imageResources.set(resourceUri, resource);
+  console.log(`Individual image registered as resource: ${resourceUri}`);
+  
+  return filePath;
+}
+
 async function checkRobotsTxt(
   url: string,
   userAgent: string
@@ -404,6 +467,25 @@ async function fetchUrl(
         if (fetchedImages.length > 0) {
           const imageBuffers = fetchedImages.map((img) => img.data);
 
+          // 個別画像をリソースとして保存（オプションに関係なく常に実行）
+          for (let i = 0; i < fetchedImages.length; i++) {
+            try {
+              const img = fetchedImages[i];
+              const optimizedIndividualImage = await sharp(img.data)
+                .jpeg({ quality: 80, mozjpeg: true })
+                .toBuffer();
+              
+              await saveIndividualImageAndRegisterResource(
+                optimizedIndividualImage,
+                url,
+                startIdx + i,
+                img.alt
+              );
+            } catch (error) {
+              console.warn(`Failed to save individual image ${i}:`, error);
+            }
+          }
+
           const mergedImage = await mergeImagesVertically(
             imageBuffers,
             options.imageMaxWidth,
@@ -484,6 +566,7 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
+      resources: {},
     },
   }
 );
@@ -692,6 +775,62 @@ server.setRequestHandler(
         ],
         isError: true,
       };
+    }
+  }
+);
+
+// Resources handlers
+const ListResourcesSchema = z.object({
+  method: z.literal("resources/list"),
+});
+
+const ReadResourceSchema = z.object({
+  method: z.literal("resources/read"),
+  params: z.object({
+    uri: z.string(),
+  }),
+});
+
+server.setRequestHandler(
+  ListResourcesSchema,
+  async (request: { method: "resources/list" }) => {
+    const resources = Array.from(imageResources.values()).map(resource => ({
+      uri: resource.uri,
+      name: resource.name,
+      description: resource.description,
+      mimeType: resource.mimeType,
+    }));
+    
+    return {
+      resources,
+    };
+  }
+);
+
+server.setRequestHandler(
+  ReadResourceSchema,
+  async (request: { method: "resources/read"; params: { uri: string } }) => {
+    const resource = imageResources.get(request.params.uri);
+    
+    if (!resource) {
+      throw new Error(`Resource not found: ${request.params.uri}`);
+    }
+    
+    try {
+      const fileData = await fs.readFile(resource.filePath);
+      const base64Data = fileData.toString('base64');
+      
+      return {
+        contents: [
+          {
+            uri: resource.uri,
+            mimeType: resource.mimeType,
+            text: base64Data,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(`Failed to read resource file: ${error}`);
     }
   }
 );
