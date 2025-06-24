@@ -360,7 +360,7 @@ async function saveIndividualImageAndRegisterResource(
   };
   
   imageResources.set(resourceUri, resource);
-  console.log(`Individual image registered as resource: ${resourceUri}`);
+  console.error(`Individual image registered as resource: ${resourceUri}`);
   
   return filePath;
 }
@@ -515,7 +515,7 @@ async function fetchUrl(
           if (options.saveImages) {
             try {
               filePath = await saveImageToFile(optimizedImage, url, options.imageStartIndex);
-              console.log(`Image saved to: ${filePath}`);
+              console.error(`Image saved to: ${filePath}`);
             } catch (error) {
               console.warn("Failed to save image to file:", error);
             }
