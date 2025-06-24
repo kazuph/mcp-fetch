@@ -44,6 +44,126 @@ interface ImageResource {
 // Global resource registry for images
 const imageResources = new Map<string, ImageResource>();
 
+// Server instance to send notifications
+let serverInstance: Server;
+
+/**
+ * リソースリストが変更されたことをクライアントに通知
+ */
+async function notifyResourcesChanged(): Promise<void> {
+  if (serverInstance) {
+    try {
+      await serverInstance.sendResourceListChanged();
+    } catch (error) {
+      console.warn('Failed to notify resource list changed:', error);
+    }
+  }
+}
+
+/**
+ * 既存のダウンロードファイルをスキャンしてリソースとして登録
+ */
+async function scanAndRegisterExistingFiles(): Promise<void> {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch');
+  
+  try {
+    // 日付ディレクトリをスキャン
+    const dateDirs = await fs.readdir(baseDir);
+    
+    for (const dateDir of dateDirs) {
+      if (dateDir.startsWith('.')) continue; // .DS_Store などをスキップ
+      
+      const datePath = path.join(baseDir, dateDir);
+      const stats = await fs.stat(datePath);
+      
+      if (!stats.isDirectory()) continue;
+      
+      try {
+        // 日付ディレクトリ直下のファイルをチェック
+        const files = await fs.readdir(datePath);
+        
+        for (const file of files) {
+          if (!file.toLowerCase().endsWith('.jpg')) continue;
+          
+          const filePath = path.join(datePath, file);
+          const fileStats = await fs.stat(filePath);
+          
+          if (!fileStats.isFile()) continue;
+          
+          // リソースURIを生成 (file:// scheme)
+          const resourceUri = `file://${filePath}`;
+          
+          // ファイル名から情報を抽出
+          const baseName = path.basename(file, '.jpg');
+          const isIndividual = file.includes('individual');
+          const isMerged = !isIndividual && !file.includes('individual');
+          
+          const resourceName = `${dateDir}/${baseName}`;
+          const description = `${isIndividual ? 'Individual' : 'Merged'} image from ${dateDir}`;
+          
+          const resource: ImageResource = {
+            uri: resourceUri,
+            name: resourceName,
+            description,
+            mimeType: 'image/jpeg',
+            filePath
+          };
+          
+          imageResources.set(resourceUri, resource);
+        }
+        
+        // サブディレクトリもチェック (individual/merged が存在する場合)
+        const subDirs = ['individual', 'merged'];
+        
+        for (const subDir of subDirs) {
+          const subDirPath = path.join(datePath, subDir);
+          
+          try {
+            const subFiles = await fs.readdir(subDirPath);
+            
+            for (const file of subFiles) {
+              if (!file.toLowerCase().endsWith('.jpg')) continue;
+              
+              const filePath = path.join(subDirPath, file);
+              const fileStats = await fs.stat(filePath);
+              
+              if (!fileStats.isFile()) continue;
+              
+              // リソースURIを生成 (file:// scheme)
+              const resourceUri = `file://${filePath}`;
+              
+              // ファイル名から情報を抽出
+              const baseName = path.basename(file, '.jpg');
+              const resourceName = `${dateDir}/${subDir}/${baseName}`;
+              const description = `${subDir === 'individual' ? 'Individual' : 'Merged'} image from ${dateDir}`;
+              
+              const resource: ImageResource = {
+                uri: resourceUri,
+                name: resourceName,
+                description,
+                mimeType: 'image/jpeg',
+                filePath
+              };
+              
+              imageResources.set(resourceUri, resource);
+            }
+          } catch (error) {
+            // サブディレクトリが存在しない場合はスキップ
+            continue;
+          }
+        }
+      } catch (error) {
+        console.warn(`Failed to scan directory ${datePath}:`, error);
+      }
+    }
+    
+    console.error(`Registered ${imageResources.size} existing image resources`);
+  } catch (error) {
+    console.warn('Failed to scan existing downloads:', error);
+  }
+}
+
 
 const DEFAULT_USER_AGENT_AUTONOMOUS =
   "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)";
@@ -335,6 +455,24 @@ async function saveImageToFile(
   // ファイルに保存
   await fs.writeFile(filePath, imageBuffer);
   
+  // リソースとして登録
+  const resourceUri = `file://${filePath}`;
+  const resourceName = `${dateStr}/merged/${filename}`;
+  const description = `Merged image from ${sourceUrl} saved on ${dateStr}`;
+  
+  const resource: ImageResource = {
+    uri: resourceUri,
+    name: resourceName,
+    description,
+    mimeType: 'image/jpeg',
+    filePath
+  };
+  
+  imageResources.set(resourceUri, resource);
+  
+  // クライアントにリソース変更を通知
+  await notifyResourcesChanged();
+  
   return filePath;
 }
 
@@ -384,7 +522,9 @@ async function saveIndividualImageAndRegisterResource(
   };
   
   imageResources.set(resourceUri, resource);
-  // Individual image registered as resource
+  
+  // クライアントにリソース変更を通知
+  await notifyResourcesChanged();
   
   return filePath;
 }
@@ -586,15 +726,21 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.3.3",
+    version: "1.5.0",
   },
   {
     capabilities: {
       tools: {},
-      resources: {},
+      resources: {
+        subscribe: true,
+        listChanged: true,
+      },
     },
   }
 );
+
+// Store server instance for notifications
+serverInstance = server;
 
 // コマンドライン引数の情報をログに出力
 console.error(
@@ -862,6 +1008,9 @@ server.setRequestHandler(
 
 // Start server
 async function runServer() {
+  // サーバー起動時に既存のファイルをリソースとして登録
+  await scanAndRegisterExistingFiles();
+  
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
