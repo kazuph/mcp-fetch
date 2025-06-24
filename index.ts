@@ -67,27 +67,36 @@ async function loadExistingImages() {
       const datePath = path.join(baseDir, dateDir.name);
       const files = await fs.readdir(datePath);
       
-      for (const file of files) {
-        if (file.endsWith('.jpg') && file.includes('_individual_')) {
-          const filePath = path.join(datePath, file);
-          const resourceUri = `file://${filePath}`;
-          
-          // ファイル名から情報を抽出
-          const parts = file.replace('.jpg', '').split('_');
-          const hostname = parts[0];
-          const timestamp = parts[1]; // HH-MM-SS
-          const imageIndex = parts[parts.length - 1];
-          
-          const resource: ImageResource = {
-            uri: resourceUri,
-            name: `${hostname}_${dateDir.name}_${timestamp}_img${imageIndex}`,
-            description: `Image ${imageIndex} from ${hostname} (${dateDir.name} ${timestamp})`,
-            mimeType: 'image/jpeg',
-            filePath
-          };
-          
-          imageResources.set(resourceUri, resource);
+      // individual ディレクトリをチェック
+      const individualPath = path.join(datePath, 'individual');
+      try {
+        await fs.access(individualPath);
+        const individualFiles = await fs.readdir(individualPath);
+        
+        for (const file of individualFiles) {
+          if (file.endsWith('.jpg') && file.includes('_individual_')) {
+            const filePath = path.join(individualPath, file);
+            const resourceUri = `file://${filePath}`;
+            
+            // ファイル名から情報を抽出
+            const parts = file.replace('.jpg', '').split('_');
+            const hostname = parts[0];
+            const timestamp = parts[1]; // HH-MM-SS
+            const imageIndex = parts[parts.length - 1];
+            
+            const resource: ImageResource = {
+              uri: resourceUri,
+              name: `${hostname}_${dateDir.name}_${timestamp}_img${imageIndex}`,
+              description: `Image ${imageIndex} from ${hostname} (${dateDir.name} ${timestamp})`,
+              mimeType: 'image/jpeg',
+              filePath
+            };
+            
+            imageResources.set(resourceUri, resource);
+          }
         }
+      } catch {
+        // individual ディレクトリが存在しない場合は無視
       }
     }
     
@@ -347,9 +356,9 @@ async function saveImageToFile(
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
   
-  // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/
+  // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/merged/
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr);
+  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr, 'merged');
   
   // ディレクトリが存在しない場合は作成
   await fs.mkdir(baseDir, { recursive: true });
@@ -381,9 +390,9 @@ async function saveIndividualImageAndRegisterResource(
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
   
-  // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/
+  // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/individual/
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr);
+  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr, 'individual');
   
   // ディレクトリが存在しない場合は作成
   await fs.mkdir(baseDir, { recursive: true });
