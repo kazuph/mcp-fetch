@@ -75,12 +75,13 @@ async function loadExistingImages() {
           // ファイル名から情報を抽出
           const parts = file.replace('.jpg', '').split('_');
           const hostname = parts[0];
+          const timestamp = parts[1]; // HH-MM-SS
           const imageIndex = parts[parts.length - 1];
           
           const resource: ImageResource = {
             uri: resourceUri,
-            name: `${hostname}_image_${imageIndex}`,
-            description: `Saved image ${imageIndex} from ${hostname} (${dateDir.name})`,
+            name: `${hostname}_${dateDir.name}_${timestamp}_img${imageIndex}`,
+            description: `Image ${imageIndex} from ${hostname} (${dateDir.name} ${timestamp})`,
             mimeType: 'image/jpeg',
             filePath
           };
@@ -400,7 +401,7 @@ async function saveIndividualImageAndRegisterResource(
   
   // リソースとして登録
   const resourceUri = `file://${filePath}`;
-  const resourceName = `${hostname}_image_${imageIndex}`;
+  const resourceName = `${hostname}_${dateStr}_${timestamp}_img${imageIndex}`;
   const description = `Image ${imageIndex + 1} from ${sourceUrl}${altText ? ` (${altText})` : ''}`;
   
   const resource: ImageResource = {
@@ -613,7 +614,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.3.2",
+    version: "1.3.3",
   },
   {
     capabilities: {
