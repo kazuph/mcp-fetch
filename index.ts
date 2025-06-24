@@ -24,6 +24,7 @@ interface Image {
   src: string;
   alt: string;
   data?: Buffer;
+  filename?: string;
 }
 
 interface ExtractedContent {
@@ -45,7 +46,9 @@ const imageResources = new Map<string, ImageResource>();
 
 /**
  * 過去に保存された画像ファイルをスキャンしてリソースに登録
+ * (現在は使用しない - 記事フェッチ時のみリソース追加)
  */
+/*
 async function loadExistingImages() {
   try {
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
@@ -104,11 +107,32 @@ async function loadExistingImages() {
     // エラーは無視して続行
   }
 }
+*/
 
 const DEFAULT_USER_AGENT_AUTONOMOUS =
   "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)";
 const DEFAULT_USER_AGENT_MANUAL =
   "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)";
+
+/**
+ * URLから元のファイル名を抽出
+ */
+function extractFilenameFromUrl(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
+    const filename = path.basename(pathname);
+    
+    // ファイル名が空の場合や拡張子がない場合のデフォルト処理
+    if (!filename || !filename.includes('.')) {
+      return 'image.jpg';
+    }
+    
+    return filename;
+  } catch {
+    return 'image.jpg';
+  }
+}
 
 const FetchArgsSchema = z.object({
   url: z.string().url(),
@@ -212,7 +236,8 @@ function extractContentFromHtml(
   const images: Image[] = imgElements.map((img) => {
     const src = img.src;
     const alt = img.alt || "";
-    return { src, alt };
+    const filename = extractFilenameFromUrl(src);
+    return { src, alt, filename };
   });
 
   const turndownService = new TurndownService({
@@ -384,7 +409,8 @@ async function saveIndividualImageAndRegisterResource(
   imageBuffer: Buffer,
   sourceUrl: string,
   imageIndex: number,
-  altText: string = ''
+  altText: string = '',
+  originalFilename: string = 'image.jpg'
 ): Promise<string> {
   // 現在の日付をYYYY-MM-DD形式で取得
   const now = new Date();
@@ -397,11 +423,11 @@ async function saveIndividualImageAndRegisterResource(
   // ディレクトリが存在しない場合は作成
   await fs.mkdir(baseDir, { recursive: true });
   
-  // ファイル名を生成（URLのホスト名 + タイムスタンプ + インデックス）
-  const urlObj = new URL(sourceUrl);
-  const hostname = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_');
-  const timestamp = now.toISOString().replace(/[:.]/g, '-').split('T')[1].split('.')[0];
-  const filename = `${hostname}_${timestamp}_individual_${imageIndex}.jpg`;
+  // 元のファイル名を使用してユニークファイル名を生成
+  const ext = path.extname(originalFilename);
+  const baseName = path.basename(originalFilename, ext);
+  const safeBaseName = baseName.replace(/[^a-zA-Z0-9\-_]/g, '_');
+  const filename = `${imageIndex}_${safeBaseName}${ext || '.jpg'}`;
   
   const filePath = path.join(baseDir, filename);
   
@@ -410,8 +436,8 @@ async function saveIndividualImageAndRegisterResource(
   
   // リソースとして登録
   const resourceUri = `file://${filePath}`;
-  const resourceName = `${hostname}_${dateStr}_${timestamp}_img${imageIndex}`;
-  const description = `Image ${imageIndex + 1} from ${sourceUrl}${altText ? ` (${altText})` : ''}`;
+  const resourceName = `${safeBaseName}_${imageIndex}`;
+  const description = `${originalFilename}${altText ? ` (${altText})` : ''} from ${sourceUrl}`;
   
   const resource: ImageResource = {
     uri: resourceUri,
@@ -541,7 +567,8 @@ async function fetchUrl(
                 optimizedIndividualImage,
                 url,
                 startIdx + i,
-                img.alt
+                img.alt,
+                img.filename || 'image.jpg'
               );
             } catch (error) {
               console.warn(`Failed to save individual image ${i}:`, error);
@@ -887,7 +914,7 @@ server.setRequestHandler(
           {
             uri: resource.uri,
             mimeType: resource.mimeType,
-            text: base64Data,
+            blob: base64Data,
           },
         ],
       };
@@ -899,9 +926,6 @@ server.setRequestHandler(
 
 // Start server
 async function runServer() {
-  // サーバー起動時に過去の画像をロード
-  await loadExistingImages();
-  
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
