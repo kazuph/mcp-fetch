@@ -14,6 +14,9 @@ import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import robotsParser from "robots-parser";
 import sharp from "sharp";
+import { promises as fs } from "fs";
+import path from "path";
+import { URL } from "url";
 
 interface Image {
   src: string;
@@ -82,6 +85,18 @@ const FetchArgsSchema = z.object({
     )
     .default(false),
   ignoreRobotsTxt: z
+    .union([z.boolean(), z.string()])
+    .transform((val) =>
+      typeof val === "string" ? val.toLowerCase() === "true" : val
+    )
+    .default(false),
+  saveImages: z
+    .union([z.boolean(), z.string()])
+    .transform((val) =>
+      typeof val === "string" ? val.toLowerCase() === "true" : val
+    )
+    .default(true),
+  returnBase64: z
     .union([z.boolean(), z.string()])
     .transform((val) =>
       typeof val === "string" ? val.toLowerCase() === "true" : val
@@ -254,6 +269,39 @@ async function getImageDimensions(
   };
 }
 
+/**
+ * 画像を日付ベースのディレクトリに保存し、ファイルパスを返す
+ */
+async function saveImageToFile(
+  imageBuffer: Buffer,
+  sourceUrl: string,
+  imageIndex: number = 0
+): Promise<string> {
+  // 現在の日付をYYYY-MM-DD形式で取得
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  
+  // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr);
+  
+  // ディレクトリが存在しない場合は作成
+  await fs.mkdir(baseDir, { recursive: true });
+  
+  // ファイル名を生成（URLのホスト名 + タイムスタンプ + インデックス）
+  const urlObj = new URL(sourceUrl);
+  const hostname = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_');
+  const timestamp = now.toISOString().replace(/[:.]/g, '-').split('T')[1].split('.')[0];
+  const filename = `${hostname}_${timestamp}_${imageIndex}.jpg`;
+  
+  const filePath = path.join(baseDir, filename);
+  
+  // ファイルに保存
+  await fs.writeFile(filePath, imageBuffer);
+  
+  return filePath;
+}
+
 async function checkRobotsTxt(
   url: string,
   userAgent: string
@@ -293,7 +341,7 @@ async function checkRobotsTxt(
 
 interface FetchResult {
   content: string;
-  images: { data: string; mimeType: string }[];
+  images: { data: string; mimeType: string; filePath?: string }[];
   remainingContent: number;
   remainingImages: number;
   title?: string;
@@ -312,6 +360,8 @@ async function fetchUrl(
     startIndex: 0,
     maxLength: 20000,
     enableFetchImages: false,
+    saveImages: true,
+    returnBase64: false,
   }
 ): Promise<FetchResult> {
   const response = await fetch(url, {
@@ -378,9 +428,21 @@ async function fetchUrl(
 
           const base64Image = optimizedImage.toString("base64");
 
+          // ファイル保存機能
+          let filePath: string | undefined;
+          if (options.saveImages) {
+            try {
+              filePath = await saveImageToFile(optimizedImage, url, options.imageStartIndex);
+              console.log(`Image saved to: ${filePath}`);
+            } catch (error) {
+              console.warn("Failed to save image to file:", error);
+            }
+          }
+
           processedImages.push({
-            data: base64Image,
+            data: options.returnBase64 ? base64Image : "",
             mimeType: "image/jpeg", // MIMEタイプをJPEGに変更
+            filePath,
           });
         }
       } catch (err) {
@@ -440,7 +502,7 @@ server.setRequestHandler(
   async (request: { method: "tools/list" }, extra: RequestHandlerExtra) => {
     const tools = [
       {
-        name: "fetch",
+        name: "imageFetch",
         description: `
 Retrieves URLs from the Internet and extracts their content as markdown.
 Images from the page will be processed and included with the response automatically.
@@ -456,6 +518,8 @@ Parameters:
   - imageMaxWidth (default: 1000): Maximum width of merged image
   - imageQuality (default: 80): JPEG quality (1-100)
   - enableFetchImages (default: false): Enable fetching and processing of images. FOR CLAUDE AI ONLY: YOU CAN ENABLE THIS FEATURE!!! CLAUDE IS ALLOWED TO USE IMAGES!!!
+  - saveImages (default: true): Save processed images to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
+  - returnBase64 (default: false): Return base64 encoded images for AI display. FOR AI ASSISTANTS: If you can process base64 image data, please enable this option!
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
 
 Image Processing:
@@ -465,15 +529,37 @@ Image Processing:
   - Use imageStartIndex and imageMaxCount to paginate through all images
   - Response includes remaining image count and current position
 
+File Saving (default behavior):
+  - Images are automatically saved to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
+  - Filename format: hostname_HHMMSS_index.jpg
+  - File paths are included in the response for easy access
+  - Use returnBase64=true to also get base64 data for Claude Desktop display
+
 IMPORTANT: All parameters must be in proper JSON format - use double quotes for keys
 and string values, and no quotes for numbers and booleans.
 
 Examples:
-# Initial fetch:
+# Initial fetch with image processing:
 {
   "url": "https://example.com",
   "maxLength": 10000,
+  "enableFetchImages": true,
   "imageMaxCount": 2
+}
+
+# Fetch and save images to file (default behavior):
+{
+  "url": "https://example.com",
+  "enableFetchImages": true,
+  "imageMaxCount": 3
+}
+
+# Fetch, save images, and return base64 for Claude Desktop:
+{
+  "url": "https://example.com",
+  "enableFetchImages": true,
+  "returnBase64": true,
+  "imageMaxCount": 3
 }
 
 # Fetch next set of images:
@@ -506,7 +592,7 @@ server.setRequestHandler(
     try {
       const { name, arguments: args } = request.params;
 
-      if (name !== "fetch") {
+      if (name !== "imageFetch") {
         throw new Error(`Unknown tool: ${name}`);
       }
 
@@ -534,6 +620,8 @@ server.setRequestHandler(
             startIndex: parsed.data.startIndex,
             maxLength: parsed.data.maxLength,
             enableFetchImages: parsed.data.enableFetchImages,
+            saveImages: parsed.data.saveImages,
+            returnBase64: parsed.data.returnBase64,
           }
         );
 
@@ -554,7 +642,7 @@ server.setRequestHandler(
       }
 
       if (remainingInfo.length > 0) {
-        finalContent += `\n\n<e>Content truncated. ${remainingInfo.join(", ")}. Call the fetch tool with start_index=${
+        finalContent += `\n\n<e>Content truncated. ${remainingInfo.join(", ")}. Call the imageFetch tool with start_index=${
           parsed.data.startIndex + parsed.data.maxLength
         } and/or imageStartIndex=${parsed.data.imageStartIndex + images.length} to get more content.</e>`;
       }
@@ -567,12 +655,27 @@ server.setRequestHandler(
         },
       ];
 
-      // 画像があれば追加
+      // 画像があれば追加（Base64データが存在する場合のみ）
       for (const image of images) {
+        if (image.data) {
+          responseContent.push({
+            type: "image",
+            mimeType: image.mimeType,
+            data: image.data,
+          });
+        }
+      }
+
+      // 保存されたファイルの情報があれば追加
+      const savedFiles = images.filter(img => img.filePath);
+      if (savedFiles.length > 0) {
+        const fileInfoText = savedFiles.map((img, index) => 
+          `Image ${index + 1} saved to: ${img.filePath}`
+        ).join('\n');
+        
         responseContent.push({
-          type: "image",
-          mimeType: image.mimeType,
-          data: image.data,
+          type: "text",
+          text: `\n📁 Saved Images:\n${fileInfoText}`,
         });
       }
 

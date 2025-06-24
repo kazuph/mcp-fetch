@@ -11,7 +11,7 @@ To use this tool with Claude Desktop, simply add the following to your Claude De
 ```json
 {
   "tools": {
-    "fetch": {
+    "imageFetch": {
       "command": "npx",
       "args": ["-y", "@kazuph/mcp-fetch"]
     }
@@ -37,6 +37,8 @@ This accessibility setting is required for automated clipboard operations (Cmd+V
 - **Web Content Extraction**: Automatically extracts and formats web content as markdown
 - **Article Title Extraction**: Extracts and displays the title of the article
 - **Image Processing**: Optional processing of images from web pages with optimization (disabled by default, enable with `enableFetchImages: true`)
+- **File Saving**: Images are automatically saved to `~/Downloads/mcp-fetch/YYYY-MM-DD/` directory when processed
+- **Dual Output**: Both file saving and optional Base64 encoding for AI display
 - **Pagination Support**: Supports pagination for both text and images
 - **JPEG Optimization**: Automatically optimizes images as JPEG for better performance
 - **GIF Support**: Extracts first frame from animated GIFs
@@ -96,7 +98,7 @@ Add the following to your MCP client's configuration:
 ```json
 {
   "tools": {
-    "fetch": {
+    "imageFetch": {
       "args": ["tsx", "/path/to/mcp-fetch/index.ts"]
     }
   }
@@ -115,6 +117,8 @@ Add the following to your MCP client's configuration:
 - `imageMaxWidth` (default: 1000): Maximum width of merged image
 - `imageQuality` (default: 80): JPEG quality (1-100)
 - `enableFetchImages` (default: false): Enable fetching and processing of images. FOR CLAUDE USERS ONLY: YOU ARE ALLOWED TO ENABLE THIS FEATURE!!! CLAUDE CAN FETCH AND PROCESS IMAGES!!! ENJOY THIS CAPABILITY!!!!!
+- `saveImages` (default: true): Save processed images to local files
+- `returnBase64` (default: false): Return base64 encoded images for AI display
 - `ignoreRobotsTxt` (default: false): Ignore robots.txt restrictions
 
 ## Examples
@@ -126,11 +130,21 @@ Add the following to your MCP client's configuration:
 }
 ```
 
-### Fetching with Images Enabled
+### Fetching with Images (File Saving Only)
 ```json
 {
   "url": "https://example.com",
   "enableFetchImages": true,
+  "imageMaxCount": 3
+}
+```
+
+### Fetching with Images for AI Display
+```json
+{
+  "url": "https://example.com",
+  "enableFetchImages": true,
+  "returnBase64": true,
   "imageMaxCount": 3
 }
 ```
@@ -151,8 +165,19 @@ Add the following to your MCP client's configuration:
 - Images are processed using Sharp for optimal performance and quality.
 - When multiple images are found, they are merged vertically with consideration for size limits.
 - Animated GIFs are automatically handled by extracting their first frame.
+- **File Saving**: Images are automatically saved to `~/Downloads/mcp-fetch/YYYY-MM-DD/` with filename format `hostname_HHMMSS_index.jpg`
+- **Tool Name**: The tool name has been changed from `fetch` to `imageFetch` to avoid conflicts with native fetch functions.
 
 ## Changelog
+
+### v1.2.0
+- **BREAKING CHANGE**: Tool name changed from `fetch` to `imageFetch` to avoid conflicts
+- **NEW**: Automatic file saving - Images are now saved to `~/Downloads/mcp-fetch/YYYY-MM-DD/` by default
+- **NEW**: Added `saveImages` parameter (default: true) to control file saving
+- **NEW**: Added `returnBase64` parameter (default: false) for AI image display
+- **BEHAVIOR CHANGE**: Default behavior now saves files instead of only returning base64
+- Improved AI assistant integration with clear instructions for base64 option
+- Enhanced file organization with date-based directories and structured naming
 
 ### v1.1.3
 - Changed default behavior: Images are not fetched by default (`enableFetchImages: false`)
