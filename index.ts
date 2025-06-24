@@ -43,6 +43,58 @@ interface ImageResource {
 // Global resource registry for images
 const imageResources = new Map<string, ImageResource>();
 
+/**
+ * 過去に保存された画像ファイルをスキャンしてリソースに登録
+ */
+async function loadExistingImages() {
+  try {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch');
+    
+    // mcp-fetchディレクトリが存在するかチェック
+    try {
+      await fs.access(baseDir);
+    } catch {
+      return; // ディレクトリが存在しない場合は何もしない
+    }
+    
+    // 日付ディレクトリをスキャン
+    const dateDirs = await fs.readdir(baseDir, { withFileTypes: true });
+    
+    for (const dateDir of dateDirs) {
+      if (!dateDir.isDirectory()) continue;
+      
+      const datePath = path.join(baseDir, dateDir.name);
+      const files = await fs.readdir(datePath);
+      
+      for (const file of files) {
+        if (file.endsWith('.jpg') && file.includes('_individual_')) {
+          const filePath = path.join(datePath, file);
+          const resourceUri = `file://${filePath}`;
+          
+          // ファイル名から情報を抽出
+          const parts = file.replace('.jpg', '').split('_');
+          const hostname = parts[0];
+          const imageIndex = parts[parts.length - 1];
+          
+          const resource: ImageResource = {
+            uri: resourceUri,
+            name: `${hostname}_image_${imageIndex}`,
+            description: `Saved image ${imageIndex} from ${hostname} (${dateDir.name})`,
+            mimeType: 'image/jpeg',
+            filePath
+          };
+          
+          imageResources.set(resourceUri, resource);
+        }
+      }
+    }
+    
+  } catch (error) {
+    // エラーは無視して続行
+  }
+}
+
 const DEFAULT_USER_AGENT_AUTONOMOUS =
   "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)";
 const DEFAULT_USER_AGENT_MANUAL =
@@ -360,7 +412,7 @@ async function saveIndividualImageAndRegisterResource(
   };
   
   imageResources.set(resourceUri, resource);
-  console.error(`Individual image registered as resource: ${resourceUri}`);
+  // Individual image registered as resource
   
   return filePath;
 }
@@ -561,7 +613,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.0.0",
+    version: "1.3.2",
   },
   {
     capabilities: {
@@ -837,6 +889,9 @@ server.setRequestHandler(
 
 // Start server
 async function runServer() {
+  // サーバー起動時に過去の画像をロード
+  await loadExistingImages();
+  
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
