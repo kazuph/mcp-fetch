@@ -1011,7 +1011,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.5.1",
+    version: "1.5.2",
   },
   {
     capabilities: {
@@ -1057,7 +1057,7 @@ Parameters:
   - imageMaxWidth (default: 1000): Maximum width of merged image
   - imageQuality (default: 80): JPEG quality (1-100)
   - enableFetchImages (default: false): Enable fetching and processing of images. FOR CLAUDE AI ONLY: YOU CAN ENABLE THIS FEATURE!!! CLAUDE IS ALLOWED TO USE IMAGES!!!
-  - allowCrossOriginImages (default: false): When true, allows fetching images from different origins than the page URL
+  - allowCrossOriginImages (default: true): When true, allows fetching images from different origins than the page URL
   - saveImages (default: true): Save processed images to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
   - returnBase64 (default: false): Return base64 encoded images for AI display. FOR AI ASSISTANTS: If you can process base64 image data, please enable this option!
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
