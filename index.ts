@@ -430,6 +430,42 @@ function extractFilenameFromUrl(url: string): string {
   }
 }
 
+// New structured API (optional)
+const NewImagesSchema = z
+  .union([
+    z.boolean(),
+    z.object({
+      output: z.enum(["base64", "file", "both"]).optional(),
+      layout: z.enum(["merged", "individual", "both"]).optional(),
+      maxCount: z.number().int().min(0).max(10).optional(),
+      startIndex: z.number().int().min(0).optional(),
+      size: z
+        .object({
+          maxWidth: z.number().int().min(100).max(10000).optional(),
+          maxHeight: z.number().int().min(100).max(10000).optional(),
+          quality: z.number().int().min(1).max(100).optional(),
+        })
+        .optional(),
+      originPolicy: z.enum(["cross-origin", "same-origin"]).optional(),
+      saveDir: z.string().optional(),
+    }),
+  ])
+  .optional();
+
+const NewTextSchema = z
+  .object({
+    maxLength: z.number().int().positive().max(1000000).optional(),
+    startIndex: z.number().int().min(0).optional(),
+    raw: z.boolean().optional(),
+  })
+  .optional();
+
+const NewSecuritySchema = z
+  .object({
+    ignoreRobotsTxt: z.boolean().optional(),
+  })
+  .optional();
+
 const FetchArgsSchema = z.object({
   url: z
     .string()
@@ -445,6 +481,7 @@ const FetchArgsSchema = z.object({
       },
       { message: "Only http/https URLs are allowed" }
     ),
+  // legacy flat params (kept for backward compatibility)
   maxLength: z
     .union([z.number(), z.string()])
     .transform((val) => Number(val))
@@ -516,6 +553,10 @@ const FetchArgsSchema = z.object({
       typeof val === "string" ? val.toLowerCase() === "true" : val
     )
     .default(false),
+  // new structured params (optional)
+  images: NewImagesSchema,
+  text: NewTextSchema,
+  security: NewSecuritySchema,
 });
 
 const ListToolsSchema = z.object({
@@ -915,23 +956,36 @@ async function fetchUrl(
         if (fetchedImages.length > 0) {
           const imageBuffers = fetchedImages.map((img) => img.data);
 
-          // 個別画像をリソースとして保存（オプションに関係なく常に実行）
-          for (let i = 0; i < fetchedImages.length; i++) {
-            try {
-              const img = fetchedImages[i];
-              const optimizedIndividualImage = await sharp(img.data)
-                .jpeg({ quality: 80, mozjpeg: true })
-                .toBuffer();
+          // 個別画像の保存（新API: layoutがindividual/both かつ outputがfile/both の場合のみ）
+          type Layout = undefined | "merged" | "individual" | "both";
+          type Output = undefined | "base64" | "file" | "both";
+          const layout = (options as { layout?: Layout }).layout;
+          const output = (options as { output?: Output }).output;
+          const legacyMode =
+            (options as { output?: Output }).output === undefined &&
+            (options as { layout?: Layout }).layout === undefined;
+          const shouldSaveIndividual = legacyMode
+            ? true // 互換性のため、レガシーでは常に保存
+            : (layout === "individual" || layout === "both") &&
+              (output === "file" || output === "both");
 
-              await saveIndividualImageAndRegisterResource(
-                optimizedIndividualImage,
-                finalUrl,
-                startIdx + i,
-                img.alt,
-                img.filename || "image.jpg"
-              );
-            } catch (error) {
-              console.warn(`Failed to save individual image ${i}:`, error);
+          if (shouldSaveIndividual) {
+            for (let i = 0; i < fetchedImages.length; i++) {
+              try {
+                const img = fetchedImages[i];
+                const optimizedIndividualImage = await sharp(img.data)
+                  .jpeg({ quality: 80, mozjpeg: true })
+                  .toBuffer();
+                await saveIndividualImageAndRegisterResource(
+                  optimizedIndividualImage,
+                  finalUrl,
+                  startIdx + i,
+                  img.alt,
+                  img.filename || "image.jpg"
+                );
+              } catch (error) {
+                console.warn(`Failed to save individual image ${i}:`, error);
+              }
             }
           }
 
@@ -959,9 +1013,12 @@ async function fetchUrl(
 
           const base64Image = optimizedImage.toString("base64");
 
-          // ファイル保存機能
+          // ファイル保存機能（新API: outputがfile/both の場合のみ）
           let filePath: string | undefined;
-          if (options.saveImages) {
+          const shouldSaveMerged = legacyMode
+            ? options.saveImages
+            : output === "file" || output === "both";
+          if (shouldSaveMerged) {
             try {
               filePath = await saveImageToFile(
                 optimizedImage,
@@ -979,7 +1036,11 @@ async function fetchUrl(
           }
 
           processedImages.push({
-            data: options.returnBase64 ? base64Image : "",
+            data:
+              (legacyMode && options.returnBase64) ||
+              (!legacyMode && (output === "base64" || output === "both"))
+                ? base64Image
+                : "",
             mimeType: "image/jpeg", // MIMEタイプをJPEGに変更
             filePath,
           });
@@ -1018,7 +1079,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.5.2",
+    version: "1.6.0",
   },
   {
     capabilities: {
@@ -1050,69 +1111,42 @@ server.setRequestHandler(
       {
         name: "imageFetch",
         description: `
-Retrieves URLs from the Internet and extracts their content as markdown.
-Images from the page will be processed and included with the response automatically.
+画像取得に強いMCPフェッチツール。記事本文をMarkdown化し、ページ内の画像を抽出・最適化して返します。
 
-Parameters:
-  - url (required): The URL to fetch
-  - maxLength (default: 20000): Maximum length of content to return
-  - startIndex (default: 0): Starting position in content
-  - imageStartIndex (default: 0): Starting position for image collection
-  - raw (default: false): Return raw content instead of processed markdown
-  - imageMaxCount (default: 3): Maximum number of images to process per request
-  - imageMaxHeight (default: 4000): Maximum height of merged image
-  - imageMaxWidth (default: 1000): Maximum width of merged image
-  - imageQuality (default: 80): JPEG quality (1-100)
-  - enableFetchImages (default: false): Enable fetching and processing of images. FOR CLAUDE AI ONLY: YOU CAN ENABLE THIS FEATURE!!! CLAUDE IS ALLOWED TO USE IMAGES!!!
-  - allowCrossOriginImages (default: true): When true, allows fetching images from different origins than the page URL
-  - saveImages (default: true): Save processed images to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
-  - returnBase64 (default: false): Return base64 encoded images for AI display. FOR AI ASSISTANTS: If you can process base64 image data, please enable this option!
-  - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
+新APIの既定（imagesを指定した場合）
+- 画像: 取得してBASE64で返却（最大3枚を縦結合した1枚JPEG）
+- 保存: しない（オプトイン）
+- クロスオリジン: 許可（CDN想定）
 
-Image Processing:
-  - Multiple images are merged vertically into a single JPEG
-  - Images are automatically optimized and resized
-  - GIF animations are converted to static images (first frame)
-  - Use imageStartIndex and imageMaxCount to paginate through all images
-  - Response includes remaining image count and current position
+パラメータ（新API）
+- url: 取得先URL（必須）
+- images: true | { output, layout, maxCount, startIndex, size, originPolicy, saveDir }
+  - output: "base64" | "file" | "both"（既定: base64）
+  - layout: "merged" | "individual" | "both"（既定: merged）
+  - maxCount/startIndex（既定: 3 / 0）
+  - size: { maxWidth, maxHeight, quality }（既定: 1000/1600/80）
+  - originPolicy: "cross-origin" | "same-origin"（既定: cross-origin）
+- text: { maxLength, startIndex, raw }（既定: 20000/0/false）
+- security: { ignoreRobotsTxt }（既定: false）
 
-File Saving (default behavior):
-  - Images are automatically saved to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
-  - Filename format: hostname_HHMMSS_index.jpg
-  - File paths are included in the response for easy access
-  - Use returnBase64=true to also get base64 data for Claude Desktop display
+旧APIキー（enableFetchImages, returnBase64, saveImages, imageMax*, imageStartIndex 等）は後方互換のため引き続き受け付けます（非推奨）。
 
-IMPORTANT: All parameters must be in proper JSON format - use double quotes for keys
-and string values, and no quotes for numbers and booleans.
-
-Examples:
-# Initial fetch with image processing:
+Examples（新API）
 {
   "url": "https://example.com",
-  "maxLength": 10000,
-  "enableFetchImages": true,
-  "imageMaxCount": 2
+  "images": true
 }
 
-# Fetch and save images to file (default behavior):
 {
   "url": "https://example.com",
-  "enableFetchImages": true,
-  "imageMaxCount": 3
+  "images": { "output": "both", "layout": "both", "maxCount": 4 }
 }
 
-# Fetch, save images, and return base64 for Claude Desktop:
+Examples（旧API互換）
 {
   "url": "https://example.com",
   "enableFetchImages": true,
   "returnBase64": true,
-  "imageMaxCount": 3
-}
-
-# Fetch next set of images:
-{
-  "url": "https://example.com",
-  "imageStartIndex": 2,
   "imageMaxCount": 2
 }`,
         inputSchema: zodToJsonSchema(FetchArgsSchema),
@@ -1143,39 +1177,193 @@ server.setRequestHandler(
         throw new Error(`Unknown tool: ${name}`);
       }
 
-      const parsed = FetchArgsSchema.safeParse(args);
+      const parsed = FetchArgsSchema.safeParse(args || {});
       if (!parsed.success) {
         throw new Error(`Invalid arguments: ${parsed.error}`);
       }
 
-      // robots.txtをチェックする（ignoreRobotsTxtがtrueまたはコマンドラインオプションが指定されている場合はスキップ）
-      if (!parsed.data.ignoreRobotsTxt && !IGNORE_ROBOTS_TXT) {
-        await checkRobotsTxt(parsed.data.url, DEFAULT_USER_AGENT_AUTONOMOUS);
+      const a = parsed.data as Record<string, unknown> & {
+        url: string;
+        images?: unknown;
+        text?: { maxLength?: number; startIndex?: number; raw?: boolean };
+        security?: { ignoreRobotsTxt?: boolean };
+        // legacy fields (all optional)
+        enableFetchImages?: boolean;
+        saveImages?: boolean;
+        returnBase64?: boolean;
+        imageMaxWidth?: number;
+        imageMaxHeight?: number;
+        imageQuality?: number;
+        imageStartIndex?: number;
+        allowCrossOriginImages?: boolean;
+        startIndex?: number;
+        maxLength?: number;
+        raw?: boolean;
+        ignoreRobotsTxt?: boolean;
+      };
+
+      // Legacy mode detection: no new keys and/or legacy keys present
+      const hasNewKeys =
+        a.images !== undefined ||
+        a.text !== undefined ||
+        a.security !== undefined;
+      const hasLegacyKeys =
+        a.enableFetchImages !== undefined ||
+        a.saveImages !== undefined ||
+        a.returnBase64 !== undefined ||
+        a.imageMaxWidth !== undefined ||
+        a.imageMaxHeight !== undefined ||
+        a.imageQuality !== undefined ||
+        a.imageStartIndex !== undefined ||
+        a.allowCrossOriginImages !== undefined ||
+        a.startIndex !== undefined ||
+        a.maxLength !== undefined ||
+        a.raw !== undefined;
+
+      const legacyMode =
+        (!hasNewKeys && hasLegacyKeys) || (!hasNewKeys && !hasLegacyKeys);
+
+      // Build fetch options with backward compatibility
+      const fetchOptions: {
+        imageMaxCount: number;
+        imageMaxHeight: number;
+        imageMaxWidth: number;
+        imageQuality: number;
+        imageStartIndex: number;
+        startIndex: number;
+        maxLength: number;
+        enableFetchImages: boolean;
+        allowCrossOriginImages: boolean;
+        saveImages: boolean;
+        returnBase64: boolean;
+        raw?: boolean;
+        output?: "base64" | "file" | "both";
+        layout?: "merged" | "individual" | "both";
+      } = {
+        imageMaxCount: 3,
+        imageMaxHeight: 4000,
+        imageMaxWidth: 1000,
+        imageQuality: 80,
+        imageStartIndex: 0,
+        startIndex: 0,
+        maxLength: 20000,
+        enableFetchImages: false,
+        allowCrossOriginImages: true,
+        saveImages: false,
+        returnBase64: false,
+        // new API additions (optional)
+        output: undefined,
+        layout: undefined,
+      };
+
+      if (legacyMode) {
+        // Legacy defaults
+        fetchOptions.startIndex =
+          (a.startIndex as number | undefined) ?? fetchOptions.startIndex;
+        fetchOptions.maxLength =
+          (a.maxLength as number | undefined) ?? fetchOptions.maxLength;
+        fetchOptions.raw = a.raw ?? false;
+        fetchOptions.imageMaxCount =
+          (a.imageMaxCount as number | undefined) ?? fetchOptions.imageMaxCount;
+        fetchOptions.imageMaxHeight =
+          (a.imageMaxHeight as number | undefined) ??
+          fetchOptions.imageMaxHeight;
+        fetchOptions.imageMaxWidth =
+          (a.imageMaxWidth as number | undefined) ?? fetchOptions.imageMaxWidth;
+        fetchOptions.imageQuality =
+          (a.imageQuality as number | undefined) ?? fetchOptions.imageQuality;
+        fetchOptions.imageStartIndex =
+          (a.imageStartIndex as number | undefined) ??
+          fetchOptions.imageStartIndex;
+        fetchOptions.enableFetchImages = a.enableFetchImages ?? false;
+        fetchOptions.allowCrossOriginImages = a.allowCrossOriginImages ?? true;
+        fetchOptions.saveImages = a.saveImages ?? true; // keep previous default behavior
+        fetchOptions.returnBase64 = a.returnBase64 ?? false;
+        // In legacy mode we preserve prior implicit behavior: individual images saved when any saving occurs
+        fetchOptions.output =
+          fetchOptions.saveImages && fetchOptions.returnBase64
+            ? "both"
+            : fetchOptions.returnBase64
+              ? "base64"
+              : fetchOptions.saveImages
+                ? "file"
+                : undefined;
+        fetchOptions.layout = "merged"; // merged remains primary; individual saving handled inside legacy path
+      } else {
+        // New API mode
+        const imagesCfg = a.images;
+        const textCfg = a.text || {};
+        const securityCfg = a.security || {};
+
+        fetchOptions.startIndex = textCfg.startIndex ?? fetchOptions.startIndex;
+        fetchOptions.maxLength = textCfg.maxLength ?? fetchOptions.maxLength;
+        fetchOptions.raw = textCfg.raw ?? false;
+
+        // images: true | object | undefined (default true for new API?)
+        const imagesEnabled =
+          imagesCfg === undefined
+            ? false
+            : typeof imagesCfg === "boolean"
+              ? imagesCfg
+              : true;
+        fetchOptions.enableFetchImages = imagesEnabled;
+
+        if (imagesEnabled) {
+          const cfg = (
+            typeof imagesCfg === "object" && imagesCfg !== null
+              ? (imagesCfg as any)
+              : {}
+          ) as {
+            output?: "base64" | "file" | "both";
+            layout?: "merged" | "individual" | "both";
+            maxCount?: number;
+            startIndex?: number;
+            size?: { maxWidth?: number; maxHeight?: number; quality?: number };
+            originPolicy?: "cross-origin" | "same-origin";
+            saveDir?: string;
+          };
+          fetchOptions.imageMaxCount =
+            cfg.maxCount ?? fetchOptions.imageMaxCount;
+          fetchOptions.imageStartIndex =
+            cfg.startIndex ?? fetchOptions.imageStartIndex;
+          const size = cfg.size || {};
+          fetchOptions.imageMaxWidth =
+            size.maxWidth ?? fetchOptions.imageMaxWidth;
+          fetchOptions.imageMaxHeight =
+            size.maxHeight ?? fetchOptions.imageMaxHeight;
+          fetchOptions.imageQuality = size.quality ?? fetchOptions.imageQuality;
+          fetchOptions.allowCrossOriginImages =
+            (cfg.originPolicy ?? "cross-origin") === "cross-origin";
+          fetchOptions.saveImages =
+            (cfg.output ?? "base64") === "file" ||
+            (cfg.output ?? "base64") === "both";
+          fetchOptions.returnBase64 =
+            (cfg.output ?? "base64") === "base64" ||
+            (cfg.output ?? "base64") === "both";
+          fetchOptions.output = cfg.output ?? "base64";
+          fetchOptions.layout = cfg.layout ?? "merged";
+          // NOTE: saveDir (cfg.saveDir) is respected in save functions when implemented (future)
+        }
+        // security
+        a.ignoreRobotsTxt = securityCfg.ignoreRobotsTxt ?? false;
+      }
+
+      // robots.txt respect unless ignored
+      if (!a.ignoreRobotsTxt && !IGNORE_ROBOTS_TXT) {
+        await checkRobotsTxt(a.url, DEFAULT_USER_AGENT_AUTONOMOUS);
       }
 
       const { content, images, remainingContent, remainingImages, title } =
         await fetchUrl(
-          parsed.data.url,
+          a.url,
           DEFAULT_USER_AGENT_AUTONOMOUS,
-          parsed.data.raw,
-          {
-            imageMaxCount: parsed.data.imageMaxCount,
-            imageMaxHeight: parsed.data.imageMaxHeight,
-            imageMaxWidth: parsed.data.imageMaxWidth,
-            imageQuality: parsed.data.imageQuality,
-            imageStartIndex: parsed.data.imageStartIndex,
-            startIndex: parsed.data.startIndex,
-            maxLength: parsed.data.maxLength,
-            enableFetchImages: parsed.data.enableFetchImages,
-            allowCrossOriginImages: parsed.data.allowCrossOriginImages,
-            saveImages: parsed.data.saveImages,
-            returnBase64: parsed.data.returnBase64,
-          }
+          fetchOptions.raw ?? false,
+          fetchOptions
         );
 
       let finalContent = content.slice(
-        parsed.data.startIndex,
-        parsed.data.startIndex + parsed.data.maxLength
+        fetchOptions.startIndex,
+        fetchOptions.startIndex + fetchOptions.maxLength
       );
 
       // 残りの情報を追加
@@ -1185,14 +1373,14 @@ server.setRequestHandler(
       }
       if (remainingImages > 0) {
         remainingInfo.push(
-          `${remainingImages} more images available (${parsed.data.imageStartIndex + images.length}/${parsed.data.imageStartIndex + images.length + remainingImages} shown)`
+          `${remainingImages} more images available (${fetchOptions.imageStartIndex + images.length}/${fetchOptions.imageStartIndex + images.length + remainingImages} shown)`
         );
       }
 
       if (remainingInfo.length > 0) {
         finalContent += `\n\n<e>Content truncated. ${remainingInfo.join(", ")}. Call the imageFetch tool with start_index=${
-          parsed.data.startIndex + parsed.data.maxLength
-        } and/or imageStartIndex=${parsed.data.imageStartIndex + images.length} to get more content.</e>`;
+          fetchOptions.startIndex + fetchOptions.maxLength
+        } and/or imageStartIndex=${fetchOptions.imageStartIndex + images.length} to get more content.</e>`;
       }
 
       // MCP レスポンスの作成
