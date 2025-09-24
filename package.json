@@ -12,7 +12,8 @@
     "format": "biome format . --write",
     "lint": "biome lint .",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && npm run check"
+    "unit": "npm run build && vitest run --reporter=dot",
+    "test": "npm run unit && npm run typecheck && npm run format && npm run check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -31,7 +32,8 @@
     "@types/jsdom": "^21.1.6",
     "@types/node": "^20.10.5",
     "@types/turndown": "^5.0.4",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^2.0.5"
   },
   "author": "kazuph",
   "license": "MIT",

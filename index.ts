@@ -57,6 +57,7 @@ const MAX_HTML_BYTES = Number(
 const MAX_IMAGE_BYTES = Number(
   process.env.MCP_FETCH_MAX_IMAGE_BYTES || 10_000_000
 ); // 10MB
+const DISABLE_SSRF_GUARD = process.env.MCP_FETCH_DISABLE_SSRF_GUARD === "1";
 
 function isPrivateIPv4(ip: string): boolean {
   const parts = ip.split(".").map((v) => Number(v));
@@ -112,6 +113,9 @@ async function isSafeUrl(
   }
   if (!(u.protocol === "http:" || u.protocol === "https:")) {
     return { ok: false, reason: "Only http/https schemes are allowed" };
+  }
+  if (DISABLE_SSRF_GUARD) {
+    return { ok: true, url: u };
   }
   const hostname = u.hostname;
   if (!hostname) return { ok: false, reason: "Missing hostname" };
@@ -490,7 +494,7 @@ const FetchArgsSchema = z.object({
     .transform((val) =>
       typeof val === "string" ? val.toLowerCase() === "true" : val
     )
-    .default(false),
+    .default(true),
   ignoreRobotsTxt: z
     .union([z.boolean(), z.string()])
     .transform((val) =>
@@ -859,7 +863,7 @@ async function fetchUrl(
     startIndex: 0,
     maxLength: 20000,
     enableFetchImages: false,
-    allowCrossOriginImages: false,
+    allowCrossOriginImages: true,
     saveImages: true,
     returnBase64: false,
   }
@@ -1298,7 +1302,11 @@ async function runServer() {
   await server.connect(transport);
 }
 
-runServer().catch((error) => {
-  process.stderr.write(`Fatal error running server: ${error}\n`);
-  process.exit(1);
-});
+if (process.env.MCP_FETCH_DISABLE_SERVER !== "1") {
+  runServer().catch((error) => {
+    process.stderr.write(`Fatal error running server: ${error}\n`);
+    process.exit(1);
+  });
+}
+
+export { fetchUrl };
