@@ -1,9 +1,9 @@
-name: npm publish on tag
+name: npm publish on main
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -59,4 +59,3 @@ jobs:
       - name: Skip note
         if: steps.check.outputs.already == 'true'
         run: echo "This version is already published. Skipping npm publish."
-
