@@ -1,66 +1,67 @@
 {
-	"name": "@kazuph/mcp-fetch",
-	"version": "1.5.0",
-	"type": "module",
-	"description": "A Model Context Protocol server that provides web content fetching capabilities with automatic image saving and optional AI display",
-	"main": "dist/index.js",
-	"scripts": {
-		"build": "tsc",
-		"start": "node dist/index.js",
-		"dev": "tsc && node dist/index.js",
-		"check": "biome check .",
-		"format": "biome format . --write",
-		"lint": "biome lint .",
-		"typecheck": "tsc --noEmit",
-		"test": "npm run typecheck && npm run check"
-	},
-	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.0.0",
-		"@mozilla/readability": "^0.5.0",
-		"@types/sharp": "^0.31.1",
-		"jsdom": "^24.0.0",
-		"node-fetch": "^3.3.2",
-		"robots-parser": "^3.0.1",
-		"sharp": "^0.33.5",
-		"turndown": "^7.1.2",
-		"zod": "^3.22.4",
-		"zod-to-json-schema": "^3.22.4"
-	},
-	"devDependencies": {
-		"@types/jsdom": "^21.1.6",
-		"@types/node": "^20.10.5",
-		"@types/turndown": "^5.0.4",
-		"typescript": "^5.3.3"
-	},
-	"author": "kazuph",
-	"license": "MIT",
-	"publishConfig": {
-		"access": "public"
-	},
-	"files": [
-		"dist",
-		"dist/**/*.map",
-		"README.md"
-	],
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/kazuph/mcp-fetch.git"
-	},
-	"keywords": [
-		"mcp",
-		"fetch",
-		"web",
-		"content",
-		"image",
-		"processing",
-		"claude",
-		"ai"
-	],
-	"bugs": {
-		"url": "https://github.com/kazuph/mcp-fetch/issues"
-	},
-	"homepage": "https://github.com/kazuph/mcp-fetch#readme",
-	"bin": {
-		"mcp-fetch": "dist/index.js"
-	}
+  "name": "@kazuph/mcp-fetch",
+  "version": "1.5.1",
+  "type": "module",
+  "description": "A Model Context Protocol server that provides web content fetching capabilities with automatic image saving and optional AI display",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "check": "biome check .",
+    "format": "biome format . --write",
+    "lint": "biome lint .",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run check"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@mozilla/readability": "^0.6.0",
+    "@types/sharp": "^0.31.1",
+    "jsdom": "^24.0.0",
+    "node-fetch": "^3.3.2",
+    "robots-parser": "^3.0.1",
+    "sharp": "^0.33.5",
+    "turndown": "^7.1.2",
+    "zod": "^3.22.4",
+    "zod-to-json-schema": "^3.22.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.4",
+    "@types/jsdom": "^21.1.6",
+    "@types/node": "^20.10.5",
+    "@types/turndown": "^5.0.4",
+    "typescript": "^5.3.3"
+  },
+  "author": "kazuph",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "dist/**/*.map",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kazuph/mcp-fetch.git"
+  },
+  "keywords": [
+    "mcp",
+    "fetch",
+    "web",
+    "content",
+    "image",
+    "processing",
+    "claude",
+    "ai"
+  ],
+  "bugs": {
+    "url": "https://github.com/kazuph/mcp-fetch/issues"
+  },
+  "homepage": "https://github.com/kazuph/mcp-fetch#readme",
+  "bin": {
+    "mcp-fetch": "dist/index.js"
+  }
 }

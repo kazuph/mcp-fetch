@@ -117,9 +117,25 @@ Add the following to your MCP client's configuration:
 - `imageMaxWidth` (default: 1000): Maximum width of merged image
 - `imageQuality` (default: 80): JPEG quality (1-100)
 - `enableFetchImages` (default: false): Enable fetching and processing of images. FOR CLAUDE USERS ONLY: YOU ARE ALLOWED TO ENABLE THIS FEATURE!!! CLAUDE CAN FETCH AND PROCESS IMAGES!!! ENJOY THIS CAPABILITY!!!!!
+- `allowCrossOriginImages` (default: false): When true, also fetch images hosted on different origins from the page
 - `saveImages` (default: true): Save processed images to local files
 - `returnBase64` (default: false): Return base64 encoded images for AI display
 - `ignoreRobotsTxt` (default: false): Ignore robots.txt restrictions
+
+### Security Hardening (v1.5.1)
+
+- Only `http://` and `https://` URLs are allowed for page and image fetches
+- Blocks private/loopback/link-local IPs and local hostnames (e.g., `localhost`, `.local`)
+- Manual redirect handling with validation (max 3 hops)
+- Request timeouts (default 12s, configurable via `MCP_FETCH_TIMEOUT_MS`)
+- Response size limits: HTML up to 2MB, images up to 10MB (tunable via env)
+
+Environment variables:
+
+- `MCP_FETCH_TIMEOUT_MS` (default: 12000)
+- `MCP_FETCH_MAX_REDIRECTS` (default: 3)
+- `MCP_FETCH_MAX_HTML_BYTES` (default: 2000000)
+- `MCP_FETCH_MAX_IMAGE_BYTES` (default: 10000000)
 
 ## Examples
 

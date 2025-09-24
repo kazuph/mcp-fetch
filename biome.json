@@ -11,10 +11,14 @@
       "recommended": true
     }
   },
+  "files": {
+    "includes": ["./**/*.ts", "./**/*.json", "./**/*.md"],
+    "experimentalScannerIgnores": ["dist/**", "node_modules/**"]
+  },
   "javascript": {
     "formatter": {
       "quoteStyle": "double",
-      "trailingComma": "es5"
+      "trailingCommas": "es5"
     }
   }
 }

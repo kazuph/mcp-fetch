@@ -1,24 +1,22 @@
 #!/usr/bin/env node
 
+import dns from "node:dns";
+import { promises as fs } from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import type { Readable } from "node:stream";
+import { URL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type {
-  CallToolRequest,
-  ListToolsRequest,
-  ListResourcesRequest,
-  ReadResourceRequest,
-} from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
-import fetch from "node-fetch";
-import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
-import TurndownService from "turndown";
+import { JSDOM } from "jsdom";
+import type { RequestInit } from "node-fetch";
+import fetch, { type Response as FetchResponse } from "node-fetch";
 import robotsParser from "robots-parser";
 import sharp from "sharp";
-import { promises as fs } from "fs";
-import path from "path";
-import { URL } from "url";
+import TurndownService from "turndown";
+import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 interface Image {
   src: string;
@@ -47,6 +45,244 @@ const imageResources = new Map<string, ImageResource>();
 // Server instance to send notifications
 let serverInstance: Server;
 
+// --------------------
+// Security hardening
+// --------------------
+// Defaults (can be overridden by env vars)
+const FETCH_TIMEOUT_MS = Number(process.env.MCP_FETCH_TIMEOUT_MS || 12000);
+const MAX_REDIRECTS = Number(process.env.MCP_FETCH_MAX_REDIRECTS || 3);
+const MAX_HTML_BYTES = Number(
+  process.env.MCP_FETCH_MAX_HTML_BYTES || 2_000_000
+); // 2MB
+const MAX_IMAGE_BYTES = Number(
+  process.env.MCP_FETCH_MAX_IMAGE_BYTES || 10_000_000
+); // 10MB
+
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split(".").map((v) => Number(v));
+  if (
+    parts.length !== 4 ||
+    parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)
+  )
+    return false;
+  const [a, b] = parts;
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local
+  if (a === 0) return true; // non-routable
+  if (a >= 224 && a <= 239) return true; // multicast
+  if (a >= 240) return true; // reserved
+  return false;
+}
+
+function isPrivateIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  return (
+    lower === "::" ||
+    lower === "::1" ||
+    lower.startsWith("fe80:") || // link-local
+    lower.startsWith("fc") || // fc00::/7 (fc/fd)
+    lower.startsWith("fd") ||
+    lower.startsWith("ff") // multicast
+  );
+}
+
+async function resolveAllIps(hostname: string): Promise<string[]> {
+  try {
+    const records = await dns.promises.lookup(hostname, {
+      all: true,
+      verbatim: true,
+    });
+    return records.map((r) => r.address);
+  } catch {
+    return [];
+  }
+}
+
+async function isSafeUrl(
+  input: string
+): Promise<{ ok: true; url: URL } | { ok: false; reason: string }> {
+  let u: URL;
+  try {
+    u = new URL(input);
+  } catch {
+    return { ok: false, reason: "Invalid URL" };
+  }
+  if (!(u.protocol === "http:" || u.protocol === "https:")) {
+    return { ok: false, reason: "Only http/https schemes are allowed" };
+  }
+  const hostname = u.hostname;
+  if (!hostname) return { ok: false, reason: "Missing hostname" };
+  const isIp = net.isIP(hostname) !== 0;
+  if (isIp) {
+    if (net.isIP(hostname) === 4 && isPrivateIPv4(hostname)) {
+      return { ok: false, reason: "IPv4 address is private/reserved" };
+    }
+    if (net.isIP(hostname) === 6 && isPrivateIPv6(hostname)) {
+      return { ok: false, reason: "IPv6 address is private/reserved" };
+    }
+  } else {
+    const lower = hostname.toLowerCase();
+    if (
+      lower === "localhost" ||
+      lower.endsWith(".localhost") ||
+      lower.endsWith(".local")
+    ) {
+      return { ok: false, reason: "Local hostnames are not allowed" };
+    }
+    const ips = await resolveAllIps(hostname);
+    for (const ip of ips) {
+      if (
+        (net.isIP(ip) === 4 && isPrivateIPv4(ip)) ||
+        (net.isIP(ip) === 6 && isPrivateIPv6(ip))
+      ) {
+        return {
+          ok: false,
+          reason: "Hostname resolves to private/reserved address",
+        };
+      }
+    }
+  }
+  return { ok: true, url: u };
+}
+
+function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label = "request"
+): Promise<T> {
+  if (!ms || ms <= 0) return p;
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms
+    );
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
+async function safeFollowFetch(
+  inputUrl: string,
+  init: RequestInit = {},
+  opts: { maxRedirects?: number; timeoutMs?: number } = {}
+): Promise<{ response: FetchResponse; finalUrl: string }> {
+  const maxRedirects = opts.maxRedirects ?? MAX_REDIRECTS;
+  const timeoutMs = opts.timeoutMs ?? FETCH_TIMEOUT_MS;
+
+  let current = inputUrl;
+  for (let i = 0; i <= maxRedirects; i++) {
+    const safe = await isSafeUrl(current);
+    if (!safe.ok) throw new Error(`Blocked URL: ${safe.reason}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const reqInit: RequestInit = {
+        ...(init || {}),
+        redirect: "manual",
+        signal: controller.signal,
+      };
+      const resp: FetchResponse = await fetch(current, reqInit);
+      clearTimeout(timer);
+      if ([301, 302, 303, 307, 308].includes(resp.status)) {
+        const loc = resp.headers.get("location");
+        if (!loc)
+          throw new Error(
+            `Redirect status ${resp.status} without Location header`
+          );
+        const next = new URL(loc, current).toString();
+        current = next;
+        continue;
+      }
+      return { response: resp, finalUrl: current };
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  }
+  throw new Error("Too many redirects");
+}
+
+async function readTextLimited(
+  resp: FetchResponse,
+  maxBytes: number
+): Promise<{ text: string; contentType: string }> {
+  const ct = resp.headers.get("content-type") || "";
+  const cl = resp.headers.get("content-length");
+  if (cl && Number(cl) > maxBytes) {
+    throw new Error(`Response too large (${cl} bytes > ${maxBytes})`);
+  }
+  const body = resp.body as Readable | null;
+  if (!body || typeof body.on !== "function") {
+    const text = await withTimeout(resp.text(), FETCH_TIMEOUT_MS, "read text");
+    return { text, contentType: ct };
+  }
+  let size = 0;
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    body.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        body.destroy();
+        reject(new Error(`Response exceeded limit (${maxBytes} bytes)`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    body.on("end", () => resolve());
+    body.on("error", (err: Error) => reject(err));
+  });
+  return { text: Buffer.concat(chunks).toString("utf8"), contentType: ct };
+}
+
+async function readBufferLimited(
+  resp: FetchResponse,
+  maxBytes: number
+): Promise<Buffer> {
+  const cl = resp.headers.get("content-length");
+  if (cl && Number(cl) > maxBytes) {
+    throw new Error(`Response too large (${cl} bytes > ${maxBytes})`);
+  }
+  const body = resp.body as Readable | null;
+  if (!body || typeof body.on !== "function") {
+    const ab = await withTimeout(
+      resp.arrayBuffer(),
+      FETCH_TIMEOUT_MS,
+      "read buffer"
+    );
+    const buf = Buffer.from(ab);
+    if (buf.length > maxBytes)
+      throw new Error(`Response exceeded limit (${maxBytes} bytes)`);
+    return buf;
+  }
+  let size = 0;
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    body.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        body.destroy();
+        reject(new Error(`Response exceeded limit (${maxBytes} bytes)`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    body.on("end", () => resolve());
+    body.on("error", (err: Error) => reject(err));
+  });
+  return Buffer.concat(chunks);
+}
+
 /**
  * リソースリストが変更されたことをクライアントに通知
  */
@@ -55,7 +291,7 @@ async function notifyResourcesChanged(): Promise<void> {
     try {
       await serverInstance.sendResourceListChanged();
     } catch (error) {
-      console.warn('Failed to notify resource list changed:', error);
+      console.warn("Failed to notify resource list changed:", error);
     }
   }
 }
@@ -64,111 +300,108 @@ async function notifyResourcesChanged(): Promise<void> {
  * 既存のダウンロードファイルをスキャンしてリソースとして登録
  */
 async function scanAndRegisterExistingFiles(): Promise<void> {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch');
-  
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  const baseDir = path.join(homeDir, "Downloads", "mcp-fetch");
+
   try {
     // 日付ディレクトリをスキャン
     const dateDirs = await fs.readdir(baseDir);
-    
+
     for (const dateDir of dateDirs) {
-      if (dateDir.startsWith('.')) continue; // .DS_Store などをスキップ
-      
+      if (dateDir.startsWith(".")) continue; // .DS_Store などをスキップ
+
       const datePath = path.join(baseDir, dateDir);
       const stats = await fs.stat(datePath);
-      
+
       if (!stats.isDirectory()) continue;
-      
+
       try {
         // 日付ディレクトリ直下のファイルをチェック
         const files = await fs.readdir(datePath);
-        
+
         for (const file of files) {
-          if (!file.toLowerCase().endsWith('.jpg')) continue;
-          
+          if (!file.toLowerCase().endsWith(".jpg")) continue;
+
           const filePath = path.join(datePath, file);
           const fileStats = await fs.stat(filePath);
-          
+
           if (!fileStats.isFile()) continue;
-          
+
           // リソースURIを生成 (file:// scheme)
           const resourceUri = `file://${filePath}`;
-          
+
           // ファイル名から情報を抽出
-          const baseName = path.basename(file, '.jpg');
-          const isIndividual = file.includes('individual');
-          const isMerged = !isIndividual && !file.includes('individual');
-          
+          const baseName = path.basename(file, ".jpg");
+          const isIndividual = file.includes("individual");
+
           const resourceName = `${dateDir}/${baseName}`;
-          const description = `${isIndividual ? 'Individual' : 'Merged'} image from ${dateDir}`;
-          
+          const description = `${isIndividual ? "Individual" : "Merged"} image from ${dateDir}`;
+
           const resource: ImageResource = {
             uri: resourceUri,
             name: resourceName,
             description,
-            mimeType: 'image/jpeg',
-            filePath
+            mimeType: "image/jpeg",
+            filePath,
           };
-          
+
           imageResources.set(resourceUri, resource);
         }
-        
+
         // サブディレクトリもチェック (individual/merged が存在する場合)
-        const subDirs = ['individual', 'merged'];
-        
+        const subDirs = ["individual", "merged"];
+
         for (const subDir of subDirs) {
           const subDirPath = path.join(datePath, subDir);
-          
+
           try {
             const subFiles = await fs.readdir(subDirPath);
-            
+
             for (const file of subFiles) {
-              if (!file.toLowerCase().endsWith('.jpg')) continue;
-              
+              if (!file.toLowerCase().endsWith(".jpg")) continue;
+
               const filePath = path.join(subDirPath, file);
               const fileStats = await fs.stat(filePath);
-              
+
               if (!fileStats.isFile()) continue;
-              
+
               // リソースURIを生成 (file:// scheme)
               const resourceUri = `file://${filePath}`;
-              
+
               // ファイル名から情報を抽出
-              const baseName = path.basename(file, '.jpg');
+              const baseName = path.basename(file, ".jpg");
               const resourceName = `${dateDir}/${subDir}/${baseName}`;
-              const description = `${subDir === 'individual' ? 'Individual' : 'Merged'} image from ${dateDir}`;
-              
+              const description = `${subDir === "individual" ? "Individual" : "Merged"} image from ${dateDir}`;
+
               const resource: ImageResource = {
                 uri: resourceUri,
                 name: resourceName,
                 description,
-                mimeType: 'image/jpeg',
-                filePath
+                mimeType: "image/jpeg",
+                filePath,
               };
-              
+
               imageResources.set(resourceUri, resource);
             }
-          } catch (error) {
+          } catch (_error) {
             // サブディレクトリが存在しない場合はスキップ
-            continue;
           }
         }
       } catch (error) {
         console.warn(`Failed to scan directory ${datePath}:`, error);
       }
     }
-    
+
     console.error(`Registered ${imageResources.size} existing image resources`);
   } catch (error) {
-    console.warn('Failed to scan existing downloads:', error);
+    console.warn("Failed to scan existing downloads:", error);
   }
 }
 
-
 const DEFAULT_USER_AGENT_AUTONOMOUS =
   "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)";
-const DEFAULT_USER_AGENT_MANUAL =
-  "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)";
+// const DEFAULT_USER_AGENT_MANUAL =
+//   "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)";
 
 /**
  * URLから元のファイル名を抽出
@@ -178,20 +411,33 @@ function extractFilenameFromUrl(url: string): string {
     const urlObj = new URL(url);
     const pathname = urlObj.pathname;
     const filename = path.basename(pathname);
-    
+
     // ファイル名が空の場合や拡張子がない場合のデフォルト処理
-    if (!filename || !filename.includes('.')) {
-      return 'image.jpg';
+    if (!filename || !filename.includes(".")) {
+      return "image.jpg";
     }
-    
+
     return filename;
   } catch {
-    return 'image.jpg';
+    return "image.jpg";
   }
 }
 
 const FetchArgsSchema = z.object({
-  url: z.string().url(),
+  url: z
+    .string()
+    .url()
+    .refine(
+      (val) => {
+        try {
+          const u = new URL(val);
+          return u.protocol === "http:" || u.protocol === "https:";
+        } catch {
+          return false;
+        }
+      },
+      { message: "Only http/https URLs are allowed" }
+    ),
   maxLength: z
     .union([z.number(), z.string()])
     .transform((val) => Number(val))
@@ -234,6 +480,12 @@ const FetchArgsSchema = z.object({
     .pipe(z.number().min(1).max(100))
     .default(80),
   enableFetchImages: z
+    .union([z.boolean(), z.string()])
+    .transform((val) =>
+      typeof val === "string" ? val.toLowerCase() === "true" : val
+    )
+    .default(false),
+  allowCrossOriginImages: z
     .union([z.boolean(), z.string()])
     .transform((val) =>
       typeof val === "string" ? val.toLowerCase() === "true" : val
@@ -302,18 +554,27 @@ function extractContentFromHtml(
   });
   const markdown = turndownService.turndown(article.content);
 
-  return { markdown, images, title: article.title };
+  return { markdown, images, title: article.title ?? undefined };
 }
 
 async function fetchImages(
-  images: Image[]
+  images: Image[],
+  baseOrigin: string,
+  allowCrossOrigin: boolean
 ): Promise<(Image & { data: Buffer })[]> {
   const fetchedImages = [];
   for (const img of images) {
     try {
-      const response = await fetch(img.src);
-      const buffer = await response.arrayBuffer();
-      const imageBuffer = Buffer.from(buffer);
+      const safe = await isSafeUrl(img.src);
+      if (!safe.ok) continue;
+      const srcOrigin = new URL(img.src).origin;
+      if (!allowCrossOrigin && srcOrigin !== baseOrigin) continue;
+      const { response } = await safeFollowFetch(
+        img.src,
+        {},
+        { timeoutMs: FETCH_TIMEOUT_MS }
+      );
+      const imageBuffer = await readBufferLimited(response, MAX_IMAGE_BYTES);
 
       // GIF画像の場合は最初のフレームのみ抽出
       if (img.src.toLowerCase().endsWith(".gif")) {
@@ -414,16 +675,7 @@ async function mergeImagesVertically(
     .toBuffer();
 }
 
-async function getImageDimensions(
-  buffer: Buffer
-): Promise<{ width: number; height: number; size: number }> {
-  const metadata = await sharp(buffer).metadata();
-  return {
-    width: metadata.width || 0,
-    height: metadata.height || 0,
-    size: buffer.length,
-  };
-}
+// removed unused getImageDimensions helper to satisfy linter
 
 /**
  * 画像を日付ベースのディレクトリに保存し、ファイルパスを返す
@@ -435,44 +687,54 @@ async function saveImageToFile(
 ): Promise<string> {
   // 現在の日付をYYYY-MM-DD形式で取得
   const now = new Date();
-  const dateStr = now.toISOString().split('T')[0];
-  
+  const dateStr = now.toISOString().split("T")[0];
+
   // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/merged/
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr, 'merged');
-  
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  const baseDir = path.join(
+    homeDir,
+    "Downloads",
+    "mcp-fetch",
+    dateStr,
+    "merged"
+  );
+
   // ディレクトリが存在しない場合は作成
   await fs.mkdir(baseDir, { recursive: true });
-  
+
   // ファイル名を生成（URLのホスト名 + タイムスタンプ + インデックス）
   const urlObj = new URL(sourceUrl);
-  const hostname = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_');
-  const timestamp = now.toISOString().replace(/[:.]/g, '-').split('T')[1].split('.')[0];
+  const hostname = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, "_");
+  const timestamp = now
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .split("T")[1]
+    .split(".")[0];
   const filename = `${hostname}_${timestamp}_${imageIndex}.jpg`;
-  
+
   const filePath = path.join(baseDir, filename);
-  
+
   // ファイルに保存
   await fs.writeFile(filePath, imageBuffer);
-  
+
   // リソースとして登録
   const resourceUri = `file://${filePath}`;
   const resourceName = `${dateStr}/merged/${filename}`;
   const description = `Merged image from ${sourceUrl} saved on ${dateStr}`;
-  
+
   const resource: ImageResource = {
     uri: resourceUri,
     name: resourceName,
     description,
-    mimeType: 'image/jpeg',
-    filePath
+    mimeType: "image/jpeg",
+    filePath,
   };
-  
+
   imageResources.set(resourceUri, resource);
-  
+
   // クライアントにリソース変更を通知
   await notifyResourcesChanged();
-  
+
   return filePath;
 }
 
@@ -483,49 +745,55 @@ async function saveIndividualImageAndRegisterResource(
   imageBuffer: Buffer,
   sourceUrl: string,
   imageIndex: number,
-  altText: string = '',
-  originalFilename: string = 'image.jpg'
+  altText: string = "",
+  originalFilename: string = "image.jpg"
 ): Promise<string> {
   // 現在の日付をYYYY-MM-DD形式で取得
   const now = new Date();
-  const dateStr = now.toISOString().split('T')[0];
-  
+  const dateStr = now.toISOString().split("T")[0];
+
   // 保存先ディレクトリ: ~/Downloads/mcp-fetch/YYYY-MM-DD/individual/
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const baseDir = path.join(homeDir, 'Downloads', 'mcp-fetch', dateStr, 'individual');
-  
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  const baseDir = path.join(
+    homeDir,
+    "Downloads",
+    "mcp-fetch",
+    dateStr,
+    "individual"
+  );
+
   // ディレクトリが存在しない場合は作成
   await fs.mkdir(baseDir, { recursive: true });
-  
+
   // 元のファイル名を使用してユニークファイル名を生成
   const ext = path.extname(originalFilename);
   const baseName = path.basename(originalFilename, ext);
-  const safeBaseName = baseName.replace(/[^a-zA-Z0-9\-_]/g, '_');
-  const filename = `${imageIndex}_${safeBaseName}${ext || '.jpg'}`;
-  
+  const safeBaseName = baseName.replace(/[^a-zA-Z0-9\-_]/g, "_");
+  const filename = `${imageIndex}_${safeBaseName}${ext || ".jpg"}`;
+
   const filePath = path.join(baseDir, filename);
-  
+
   // ファイルに保存
   await fs.writeFile(filePath, imageBuffer);
-  
+
   // リソースとして登録
   const resourceUri = `file://${filePath}`;
   const resourceName = `${safeBaseName}_${imageIndex}`;
-  const description = `${originalFilename}${altText ? ` (${altText})` : ''} from ${sourceUrl}`;
-  
+  const description = `${originalFilename}${altText ? ` (${altText})` : ""} from ${sourceUrl}`;
+
   const resource: ImageResource = {
     uri: resourceUri,
     name: resourceName,
     description,
-    mimeType: 'image/jpeg',
-    filePath
+    mimeType: "image/jpeg",
+    filePath,
   };
-  
+
   imageResources.set(resourceUri, resource);
-  
+
   // クライアントにリソース変更を通知
   await notifyResourcesChanged();
-  
+
   return filePath;
 }
 
@@ -537,7 +805,11 @@ async function checkRobotsTxt(
   const robotsUrl = `${protocol}//${host}/robots.txt`;
 
   try {
-    const response = await fetch(robotsUrl);
+    const { response } = await safeFollowFetch(
+      robotsUrl,
+      { headers: { "User-Agent": userAgent } },
+      { timeoutMs: Math.min(FETCH_TIMEOUT_MS, 8000) }
+    );
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw new Error(
@@ -547,7 +819,7 @@ async function checkRobotsTxt(
       return true; // Allow if no robots.txt
     }
 
-    const robotsTxt = await response.text();
+    const { text: robotsTxt } = await readTextLimited(response, 100_000);
     const robots = robotsParser(robotsUrl, robotsTxt);
 
     if (!robots.isAllowed(url, userAgent)) {
@@ -587,11 +859,12 @@ async function fetchUrl(
     startIndex: 0,
     maxLength: 20000,
     enableFetchImages: false,
+    allowCrossOriginImages: false,
     saveImages: true,
     returnBase64: false,
   }
 ): Promise<FetchResult> {
-  const response = await fetch(url, {
+  const { response, finalUrl } = await safeFollowFetch(url, {
     headers: { "User-Agent": userAgent },
   });
 
@@ -599,13 +872,12 @@ async function fetchUrl(
     throw new Error(`Failed to fetch ${url} - status code ${response.status}`);
   }
 
-  const contentType = response.headers.get("content-type") || "";
-  const text = await response.text();
+  const { text, contentType } = await readTextLimited(response, MAX_HTML_BYTES);
   const isHtml =
     text.toLowerCase().includes("<html") || contentType.includes("text/html");
 
   if (isHtml && !forceRaw) {
-    const result = extractContentFromHtml(text, url);
+    const result = extractContentFromHtml(text, finalUrl);
     if (typeof result === "string") {
       return {
         content: result,
@@ -625,7 +897,12 @@ async function fetchUrl(
     ) {
       try {
         const startIdx = options.imageStartIndex;
-        let fetchedImages = await fetchImages(images.slice(startIdx));
+        const baseOrigin = new URL(finalUrl).origin;
+        let fetchedImages = await fetchImages(
+          images.slice(startIdx),
+          baseOrigin,
+          options.allowCrossOriginImages ?? false
+        );
         fetchedImages = fetchedImages.slice(0, options.imageMaxCount);
 
         if (fetchedImages.length > 0) {
@@ -638,13 +915,13 @@ async function fetchUrl(
               const optimizedIndividualImage = await sharp(img.data)
                 .jpeg({ quality: 80, mozjpeg: true })
                 .toBuffer();
-              
+
               await saveIndividualImageAndRegisterResource(
                 optimizedIndividualImage,
-                url,
+                finalUrl,
                 startIdx + i,
                 img.alt,
-                img.filename || 'image.jpg'
+                img.filename || "image.jpg"
               );
             } catch (error) {
               console.warn(`Failed to save individual image ${i}:`, error);
@@ -679,7 +956,11 @@ async function fetchUrl(
           let filePath: string | undefined;
           if (options.saveImages) {
             try {
-              filePath = await saveImageToFile(optimizedImage, url, options.imageStartIndex);
+              filePath = await saveImageToFile(
+                optimizedImage,
+                finalUrl,
+                options.imageStartIndex
+              );
               console.error(`Image saved to: ${filePath}`);
             } catch (error) {
               console.warn("Failed to save image to file:", error);
@@ -726,7 +1007,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.5.0",
+    version: "1.5.1",
   },
   {
     capabilities: {
@@ -753,7 +1034,7 @@ interface RequestHandlerExtra {
 
 server.setRequestHandler(
   ListToolsSchema,
-  async (request: { method: "tools/list" }, extra: RequestHandlerExtra) => {
+  async (_request: { method: "tools/list" }, _extra: RequestHandlerExtra) => {
     const tools = [
       {
         name: "imageFetch",
@@ -772,6 +1053,7 @@ Parameters:
   - imageMaxWidth (default: 1000): Maximum width of merged image
   - imageQuality (default: 80): JPEG quality (1-100)
   - enableFetchImages (default: false): Enable fetching and processing of images. FOR CLAUDE AI ONLY: YOU CAN ENABLE THIS FEATURE!!! CLAUDE IS ALLOWED TO USE IMAGES!!!
+  - allowCrossOriginImages (default: false): When true, allows fetching images from different origins than the page URL
   - saveImages (default: true): Save processed images to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
   - returnBase64 (default: false): Return base64 encoded images for AI display. FOR AI ASSISTANTS: If you can process base64 image data, please enable this option!
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
@@ -841,7 +1123,7 @@ server.setRequestHandler(
       method: "tools/call";
       params: { name: string; arguments?: Record<string, unknown> };
     },
-    extra: RequestHandlerExtra
+    _extra: RequestHandlerExtra
   ) => {
     try {
       const { name, arguments: args } = request.params;
@@ -874,6 +1156,7 @@ server.setRequestHandler(
             startIndex: parsed.data.startIndex,
             maxLength: parsed.data.maxLength,
             enableFetchImages: parsed.data.enableFetchImages,
+            allowCrossOriginImages: parsed.data.allowCrossOriginImages,
             saveImages: parsed.data.saveImages,
             returnBase64: parsed.data.returnBase64,
           }
@@ -921,12 +1204,12 @@ server.setRequestHandler(
       }
 
       // 保存されたファイルの情報があれば追加
-      const savedFiles = images.filter(img => img.filePath);
+      const savedFiles = images.filter((img) => img.filePath);
       if (savedFiles.length > 0) {
-        const fileInfoText = savedFiles.map((img, index) => 
-          `Image ${index + 1} saved to: ${img.filePath}`
-        ).join('\n');
-        
+        const fileInfoText = savedFiles
+          .map((img, index) => `Image ${index + 1} saved to: ${img.filePath}`)
+          .join("\n");
+
         responseContent.push({
           type: "text",
           text: `\n📁 Saved Images:\n${fileInfoText}`,
@@ -964,14 +1247,14 @@ const ReadResourceSchema = z.object({
 
 server.setRequestHandler(
   ListResourcesSchema,
-  async (request: { method: "resources/list" }) => {
-    const resources = Array.from(imageResources.values()).map(resource => ({
+  async (_request: { method: "resources/list" }) => {
+    const resources = Array.from(imageResources.values()).map((resource) => ({
       uri: resource.uri,
       name: resource.name,
       description: resource.description,
       mimeType: resource.mimeType,
     }));
-    
+
     return {
       resources,
     };
@@ -982,15 +1265,15 @@ server.setRequestHandler(
   ReadResourceSchema,
   async (request: { method: "resources/read"; params: { uri: string } }) => {
     const resource = imageResources.get(request.params.uri);
-    
+
     if (!resource) {
       throw new Error(`Resource not found: ${request.params.uri}`);
     }
-    
+
     try {
       const fileData = await fs.readFile(resource.filePath);
-      const base64Data = fileData.toString('base64');
-      
+      const base64Data = fileData.toString("base64");
+
       return {
         contents: [
           {
@@ -1010,7 +1293,7 @@ server.setRequestHandler(
 async function runServer() {
   // サーバー起動時に既存のファイルをリソースとして登録
   await scanAndRegisterExistingFiles();
-  
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
