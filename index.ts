@@ -44,6 +44,7 @@ const imageResources = new Map<string, ImageResource>();
 
 // Server instance to send notifications
 let serverInstance: Server;
+let serverConnected = false;
 
 // --------------------
 // Security hardening
@@ -291,10 +292,12 @@ async function readBufferLimited(
  * リソースリストが変更されたことをクライアントに通知
  */
 async function notifyResourcesChanged(): Promise<void> {
-  if (serverInstance) {
-    try {
-      await serverInstance.sendResourceListChanged();
-    } catch (error) {
+  if (!serverInstance || !serverConnected) return;
+  try {
+    await serverInstance.sendResourceListChanged();
+  } catch (error) {
+    // When not connected to an MCP client, avoid noisy warnings in CI/tests
+    if (serverConnected) {
       console.warn("Failed to notify resource list changed:", error);
     }
   }
@@ -965,7 +968,11 @@ async function fetchUrl(
                 finalUrl,
                 options.imageStartIndex
               );
-              console.error(`Image saved to: ${filePath}`);
+              if (serverConnected) {
+                console.error(`Image saved to: ${filePath}`);
+              } else {
+                console.log(`Image saved to: ${filePath}`);
+              }
             } catch (error) {
               console.warn("Failed to save image to file:", error);
             }
@@ -1011,7 +1018,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.5.1",
+    version: "1.5.2",
   },
   {
     capabilities: {
@@ -1028,7 +1035,7 @@ const server = new Server(
 serverInstance = server;
 
 // コマンドライン引数の情報をログに出力
-console.error(
+console.log(
   `Server started with options: ${IGNORE_ROBOTS_TXT ? "ignore-robots-txt" : "respect-robots-txt"}`
 );
 
@@ -1057,7 +1064,7 @@ Parameters:
   - imageMaxWidth (default: 1000): Maximum width of merged image
   - imageQuality (default: 80): JPEG quality (1-100)
   - enableFetchImages (default: false): Enable fetching and processing of images. FOR CLAUDE AI ONLY: YOU CAN ENABLE THIS FEATURE!!! CLAUDE IS ALLOWED TO USE IMAGES!!!
-  - allowCrossOriginImages (default: false): When true, allows fetching images from different origins than the page URL
+  - allowCrossOriginImages (default: true): When true, allows fetching images from different origins than the page URL
   - saveImages (default: true): Save processed images to ~/Downloads/mcp-fetch/YYYY-MM-DD/ directory
   - returnBase64 (default: false): Return base64 encoded images for AI display. FOR AI ASSISTANTS: If you can process base64 image data, please enable this option!
   - ignoreRobotsTxt (default: false): Ignore robots.txt restrictions
@@ -1300,6 +1307,7 @@ async function runServer() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  serverConnected = true;
 }
 
 if (process.env.MCP_FETCH_DISABLE_SERVER !== "1") {
