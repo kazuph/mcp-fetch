@@ -1,0 +1,42 @@
+name: Create Tag and GitHub Release on main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create tag and GitHub Release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          NOTES_FILE="RELEASE_NOTES_${TAG}.md"
+          echo "Version: $VERSION | Tag: $TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Skipping."
+            exit 0
+          fi
+          if [ -f "$NOTES_FILE" ]; then
+            gh release create "$TAG" -F "$NOTES_FILE" -t "$TAG" --latest
+          else
+            gh release create "$TAG" --generate-notes -t "$TAG" --latest
+          fi
+
