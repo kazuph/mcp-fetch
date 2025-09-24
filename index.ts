@@ -44,6 +44,7 @@ const imageResources = new Map<string, ImageResource>();
 
 // Server instance to send notifications
 let serverInstance: Server;
+let serverConnected = false;
 
 // --------------------
 // Security hardening
@@ -291,10 +292,12 @@ async function readBufferLimited(
  * リソースリストが変更されたことをクライアントに通知
  */
 async function notifyResourcesChanged(): Promise<void> {
-  if (serverInstance) {
-    try {
-      await serverInstance.sendResourceListChanged();
-    } catch (error) {
+  if (!serverInstance || !serverConnected) return;
+  try {
+    await serverInstance.sendResourceListChanged();
+  } catch (error) {
+    // When not connected to an MCP client, avoid noisy warnings in CI/tests
+    if (serverConnected) {
       console.warn("Failed to notify resource list changed:", error);
     }
   }
@@ -965,7 +968,11 @@ async function fetchUrl(
                 finalUrl,
                 options.imageStartIndex
               );
-              console.error(`Image saved to: ${filePath}`);
+              if (serverConnected) {
+                console.error(`Image saved to: ${filePath}`);
+              } else {
+                console.log(`Image saved to: ${filePath}`);
+              }
             } catch (error) {
               console.warn("Failed to save image to file:", error);
             }
@@ -1028,7 +1035,7 @@ const server = new Server(
 serverInstance = server;
 
 // コマンドライン引数の情報をログに出力
-console.error(
+console.log(
   `Server started with options: ${IGNORE_ROBOTS_TXT ? "ignore-robots-txt" : "respect-robots-txt"}`
 );
 
@@ -1300,6 +1307,7 @@ async function runServer() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  serverConnected = true;
 }
 
 if (process.env.MCP_FETCH_DISABLE_SERVER !== "1") {
