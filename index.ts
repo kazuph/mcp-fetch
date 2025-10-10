@@ -1079,7 +1079,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.6.0",
+    version: "1.6.1",
   },
   {
     capabilities: {
@@ -1096,7 +1096,7 @@ const server = new Server(
 serverInstance = server;
 
 // コマンドライン引数の情報をログに出力
-console.log(
+console.error(
   `Server started with options: ${IGNORE_ROBOTS_TXT ? "ignore-robots-txt" : "respect-robots-txt"}`
 );
 
