@@ -1090,7 +1090,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.6.1",
+    version: "1.6.2",
   },
   {
     capabilities: {
