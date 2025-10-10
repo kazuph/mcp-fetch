@@ -91,6 +91,13 @@ function isPrivateIPv6(ip: string): boolean {
   );
 }
 
+function isNodeErrorWithCode(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    typeof (error as NodeJS.ErrnoException).code === "string"
+  );
+}
+
 async function resolveAllIps(hostname: string): Promise<string[]> {
   try {
     const records = await dns.promises.lookup(hostname, {
@@ -401,6 +408,10 @@ async function scanAndRegisterExistingFiles(): Promise<void> {
 
     console.error(`Registered ${imageResources.size} existing image resources`);
   } catch (error) {
+    if (isNodeErrorWithCode(error) && error.code === "ENOENT") {
+      // No downloads directory yet; nothing to register on startup
+      return;
+    }
     console.warn("Failed to scan existing downloads:", error);
   }
 }
@@ -1079,7 +1090,7 @@ const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.6.1",
+    version: "1.6.2",
   },
   {
     capabilities: {
