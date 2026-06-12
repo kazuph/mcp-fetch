@@ -2,6 +2,7 @@
 
 import dns from "node:dns";
 import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { URL } from "node:url";
@@ -1067,10 +1068,16 @@ const args = process.argv.slice(2);
 const IGNORE_ROBOTS_TXT = args.includes("--ignore-robots-txt");
 
 // Server setup
+// Read the version from package.json (dist/index.js -> ../package.json) so
+// the serverInfo handshake never drifts from the published npm version.
+const PKG_VERSION: string = createRequire(import.meta.url)(
+  "../package.json"
+).version;
+
 const server = new Server(
   {
     name: "mcp-fetch",
-    version: "1.6.2",
+    version: PKG_VERSION,
   },
   {
     capabilities: {
