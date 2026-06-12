@@ -1,6 +1,6 @@
 {
   "name": "@kazuph/mcp-fetch",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "type": "module",
   "description": "A Model Context Protocol server that provides web content fetching capabilities with automatic image saving and optional AI display",
   "main": "dist/index.js",
@@ -16,16 +16,14 @@
     "test": "npm run unit && npm run typecheck && npm run format && npm run check"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.20.0",
     "@mozilla/readability": "^0.6.0",
-    "@types/sharp": "^0.31.1",
     "jsdom": "^24.0.0",
-    "node-fetch": "^3.3.2",
     "robots-parser": "^3.0.1",
     "sharp": "^0.33.5",
     "turndown": "^7.1.2",
-    "zod": "^3.22.4",
-    "zod-to-json-schema": "^3.22.4"
+    "zod": "^3.25.0",
+    "zod-to-json-schema": "^3.25.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.2.4",
@@ -33,7 +31,7 @@
     "@types/node": "^20.10.5",
     "@types/turndown": "^5.0.4",
     "typescript": "^5.3.3",
-    "vitest": "^2.0.5"
+    "vitest": "^3.2.6"
   },
   "author": "kazuph",
   "license": "MIT",

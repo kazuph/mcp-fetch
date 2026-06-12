@@ -4,14 +4,17 @@ import dns from "node:dns";
 import { promises as fs } from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import type { Readable } from "node:stream";
 import { URL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
-import type { RequestInit } from "node-fetch";
-import fetch, { type Response as FetchResponse } from "node-fetch";
 import robotsParser from "robots-parser";
 import sharp from "sharp";
 import TurndownService from "turndown";
@@ -188,7 +191,7 @@ async function safeFollowFetch(
   inputUrl: string,
   init: RequestInit = {},
   opts: { maxRedirects?: number; timeoutMs?: number } = {}
-): Promise<{ response: FetchResponse; finalUrl: string }> {
+): Promise<{ response: Response; finalUrl: string }> {
   const maxRedirects = opts.maxRedirects ?? MAX_REDIRECTS;
   const timeoutMs = opts.timeoutMs ?? FETCH_TIMEOUT_MS;
 
@@ -204,7 +207,7 @@ async function safeFollowFetch(
         redirect: "manual",
         signal: controller.signal,
       };
-      const resp: FetchResponse = await fetch(current, reqInit);
+      const resp: Response = await fetch(current, reqInit);
       clearTimeout(timer);
       if ([301, 302, 303, 307, 308].includes(resp.status)) {
         const loc = resp.headers.get("location");
@@ -225,74 +228,64 @@ async function safeFollowFetch(
   throw new Error("Too many redirects");
 }
 
-async function readTextLimited(
-  resp: FetchResponse,
-  maxBytes: number
-): Promise<{ text: string; contentType: string }> {
-  const ct = resp.headers.get("content-type") || "";
-  const cl = resp.headers.get("content-length");
-  if (cl && Number(cl) > maxBytes) {
-    throw new Error(`Response too large (${cl} bytes > ${maxBytes})`);
-  }
-  const body = resp.body as Readable | null;
-  if (!body || typeof body.on !== "function") {
-    const text = await withTimeout(resp.text(), FETCH_TIMEOUT_MS, "read text");
-    return { text, contentType: ct };
-  }
-  let size = 0;
-  const chunks: Buffer[] = [];
-  await new Promise<void>((resolve, reject) => {
-    body.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        body.destroy();
-        reject(new Error(`Response exceeded limit (${maxBytes} bytes)`));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    body.on("end", () => resolve());
-    body.on("error", (err: Error) => reject(err));
-  });
-  return { text: Buffer.concat(chunks).toString("utf8"), contentType: ct };
-}
-
-async function readBufferLimited(
-  resp: FetchResponse,
+// Drains a WHATWG ReadableStream (the body type of the global fetch) while
+// enforcing a hard byte cap incrementally, so an oversized response is aborted
+// mid-stream instead of being buffered fully into memory first.
+async function readBodyLimited(
+  resp: Response,
   maxBytes: number
 ): Promise<Buffer> {
   const cl = resp.headers.get("content-length");
   if (cl && Number(cl) > maxBytes) {
     throw new Error(`Response too large (${cl} bytes > ${maxBytes})`);
   }
-  const body = resp.body as Readable | null;
-  if (!body || typeof body.on !== "function") {
-    const ab = await withTimeout(
-      resp.arrayBuffer(),
-      FETCH_TIMEOUT_MS,
-      "read buffer"
-    );
+  if (!resp.body) {
+    const ab = await resp.arrayBuffer();
     const buf = Buffer.from(ab);
-    if (buf.length > maxBytes)
+    if (buf.length > maxBytes) {
       throw new Error(`Response exceeded limit (${maxBytes} bytes)`);
+    }
     return buf;
   }
   let size = 0;
   const chunks: Buffer[] = [];
-  await new Promise<void>((resolve, reject) => {
-    body.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        body.destroy();
-        reject(new Error(`Response exceeded limit (${maxBytes} bytes)`));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    body.on("end", () => resolve());
-    body.on("error", (err: Error) => reject(err));
-  });
+  const reader = resp.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      throw new Error(`Response exceeded limit (${maxBytes} bytes)`);
+    }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  }
   return Buffer.concat(chunks);
+}
+
+async function readTextLimited(
+  resp: Response,
+  maxBytes: number
+): Promise<{ text: string; contentType: string }> {
+  const ct = resp.headers.get("content-type") || "";
+  const buf = await withTimeout(
+    readBodyLimited(resp, maxBytes),
+    FETCH_TIMEOUT_MS,
+    "read text"
+  );
+  return { text: buf.toString("utf8"), contentType: ct };
+}
+
+async function readBufferLimited(
+  resp: Response,
+  maxBytes: number
+): Promise<Buffer> {
+  return withTimeout(
+    readBodyLimited(resp, maxBytes),
+    FETCH_TIMEOUT_MS,
+    "read buffer"
+  );
 }
 
 /**
@@ -568,18 +561,6 @@ const FetchArgsSchema = z.object({
   images: NewImagesSchema,
   text: NewTextSchema,
   security: NewSecuritySchema,
-});
-
-const ListToolsSchema = z.object({
-  method: z.literal("tools/list"),
-});
-
-const CallToolSchema = z.object({
-  method: z.literal("tools/call"),
-  params: z.object({
-    name: z.string(),
-    arguments: z.record(z.unknown()).optional(),
-  }),
 });
 
 function extractContentFromHtml(
@@ -1036,11 +1017,10 @@ async function fetchUrl(
                 finalUrl,
                 options.imageStartIndex
               );
-              if (serverConnected) {
-                console.error(`Image saved to: ${filePath}`);
-              } else {
-                console.log(`Image saved to: ${filePath}`);
-              }
+              // Diagnostics MUST go to stderr: stdout is reserved for the
+              // MCP JSON-RPC stream and any stray stdout write corrupts it
+              // (clients fail with "... is not valid JSON").
+              console.error(`Image saved to: ${filePath}`);
             } catch (error) {
               console.warn("Failed to save image to file:", error);
             }
@@ -1111,17 +1091,11 @@ console.error(
   `Server started with options: ${IGNORE_ROBOTS_TXT ? "ignore-robots-txt" : "respect-robots-txt"}`
 );
 
-interface RequestHandlerExtra {
-  signal: AbortSignal;
-}
-
-server.setRequestHandler(
-  ListToolsSchema,
-  async (_request: { method: "tools/list" }, _extra: RequestHandlerExtra) => {
-    const tools = [
-      {
-        name: "imageFetch",
-        description: `
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const tools = [
+    {
+      name: "imageFetch",
+      description: `
 画像取得に強いMCPフェッチツール。記事本文をMarkdown化し、ページ内の画像を抽出・最適化して返します。
 
 新APIの既定（imagesを指定した場合）
@@ -1160,344 +1134,315 @@ Examples（旧API互換）
   "returnBase64": true,
   "imageMaxCount": 2
 }`,
-        inputSchema: zodToJsonSchema(FetchArgsSchema),
-      },
-    ];
-    return { tools };
-  }
-);
+      inputSchema: zodToJsonSchema(FetchArgsSchema),
+    },
+  ];
+  return { tools };
+});
 
 // MCPレスポンスの型定義
 type MCPResponseContent =
   | { type: "text"; text: string }
   | { type: "image"; mimeType: string; data: string };
 
-server.setRequestHandler(
-  CallToolSchema,
-  async (
-    request: {
-      method: "tools/call";
-      params: { name: string; arguments?: Record<string, unknown> };
-    },
-    _extra: RequestHandlerExtra
-  ) => {
-    try {
-      const { name, arguments: args } = request.params;
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  try {
+    const { name, arguments: args } = request.params;
 
-      if (name !== "imageFetch") {
-        throw new Error(`Unknown tool: ${name}`);
-      }
+    if (name !== "imageFetch") {
+      throw new Error(`Unknown tool: ${name}`);
+    }
 
-      const parsed = FetchArgsSchema.safeParse(args || {});
-      if (!parsed.success) {
-        throw new Error(`Invalid arguments: ${parsed.error}`);
-      }
+    const parsed = FetchArgsSchema.safeParse(args || {});
+    if (!parsed.success) {
+      throw new Error(`Invalid arguments: ${parsed.error}`);
+    }
 
-      const a = parsed.data as Record<string, unknown> & {
-        url: string;
-        images?: unknown;
-        text?: { maxLength?: number; startIndex?: number; raw?: boolean };
-        security?: { ignoreRobotsTxt?: boolean };
-        // legacy fields (all optional)
-        enableFetchImages?: boolean;
-        saveImages?: boolean;
-        returnBase64?: boolean;
-        imageMaxWidth?: number;
-        imageMaxHeight?: number;
-        imageQuality?: number;
-        imageStartIndex?: number;
-        allowCrossOriginImages?: boolean;
-        startIndex?: number;
-        maxLength?: number;
-        raw?: boolean;
-        ignoreRobotsTxt?: boolean;
-      };
+    const a = parsed.data as Record<string, unknown> & {
+      url: string;
+      images?: unknown;
+      text?: { maxLength?: number; startIndex?: number; raw?: boolean };
+      security?: { ignoreRobotsTxt?: boolean };
+      // legacy fields (all optional)
+      enableFetchImages?: boolean;
+      saveImages?: boolean;
+      returnBase64?: boolean;
+      imageMaxWidth?: number;
+      imageMaxHeight?: number;
+      imageQuality?: number;
+      imageStartIndex?: number;
+      allowCrossOriginImages?: boolean;
+      startIndex?: number;
+      maxLength?: number;
+      raw?: boolean;
+      ignoreRobotsTxt?: boolean;
+    };
 
-      // Legacy mode detection: no new keys and/or legacy keys present
-      const hasNewKeys =
-        a.images !== undefined ||
-        a.text !== undefined ||
-        a.security !== undefined;
-      const hasLegacyKeys =
-        a.enableFetchImages !== undefined ||
-        a.saveImages !== undefined ||
-        a.returnBase64 !== undefined ||
-        a.imageMaxWidth !== undefined ||
-        a.imageMaxHeight !== undefined ||
-        a.imageQuality !== undefined ||
-        a.imageStartIndex !== undefined ||
-        a.allowCrossOriginImages !== undefined ||
-        a.startIndex !== undefined ||
-        a.maxLength !== undefined ||
-        a.raw !== undefined;
+    // Legacy mode detection: no new keys and/or legacy keys present
+    const hasNewKeys =
+      a.images !== undefined ||
+      a.text !== undefined ||
+      a.security !== undefined;
+    const hasLegacyKeys =
+      a.enableFetchImages !== undefined ||
+      a.saveImages !== undefined ||
+      a.returnBase64 !== undefined ||
+      a.imageMaxWidth !== undefined ||
+      a.imageMaxHeight !== undefined ||
+      a.imageQuality !== undefined ||
+      a.imageStartIndex !== undefined ||
+      a.allowCrossOriginImages !== undefined ||
+      a.startIndex !== undefined ||
+      a.maxLength !== undefined ||
+      a.raw !== undefined;
 
-      const legacyMode =
-        (!hasNewKeys && hasLegacyKeys) || (!hasNewKeys && !hasLegacyKeys);
+    const legacyMode =
+      (!hasNewKeys && hasLegacyKeys) || (!hasNewKeys && !hasLegacyKeys);
 
-      // Build fetch options with backward compatibility
-      const fetchOptions: {
-        imageMaxCount: number;
-        imageMaxHeight: number;
-        imageMaxWidth: number;
-        imageQuality: number;
-        imageStartIndex: number;
-        startIndex: number;
-        maxLength: number;
-        enableFetchImages: boolean;
-        allowCrossOriginImages: boolean;
-        saveImages: boolean;
-        returnBase64: boolean;
-        raw?: boolean;
-        output?: "base64" | "file" | "both";
-        layout?: "merged" | "individual" | "both";
-      } = {
-        imageMaxCount: 3,
-        imageMaxHeight: 4000,
-        imageMaxWidth: 1000,
-        imageQuality: 80,
-        imageStartIndex: 0,
-        startIndex: 0,
-        maxLength: 20000,
-        enableFetchImages: false,
-        allowCrossOriginImages: true,
-        saveImages: false,
-        returnBase64: false,
-        // new API additions (optional)
-        output: undefined,
-        layout: undefined,
-      };
+    // Build fetch options with backward compatibility
+    const fetchOptions: {
+      imageMaxCount: number;
+      imageMaxHeight: number;
+      imageMaxWidth: number;
+      imageQuality: number;
+      imageStartIndex: number;
+      startIndex: number;
+      maxLength: number;
+      enableFetchImages: boolean;
+      allowCrossOriginImages: boolean;
+      saveImages: boolean;
+      returnBase64: boolean;
+      raw?: boolean;
+      output?: "base64" | "file" | "both";
+      layout?: "merged" | "individual" | "both";
+    } = {
+      imageMaxCount: 3,
+      imageMaxHeight: 4000,
+      imageMaxWidth: 1000,
+      imageQuality: 80,
+      imageStartIndex: 0,
+      startIndex: 0,
+      maxLength: 20000,
+      enableFetchImages: false,
+      allowCrossOriginImages: true,
+      saveImages: false,
+      returnBase64: false,
+      // new API additions (optional)
+      output: undefined,
+      layout: undefined,
+    };
 
-      if (legacyMode) {
-        // Legacy defaults
-        fetchOptions.startIndex =
-          (a.startIndex as number | undefined) ?? fetchOptions.startIndex;
-        fetchOptions.maxLength =
-          (a.maxLength as number | undefined) ?? fetchOptions.maxLength;
-        fetchOptions.raw = a.raw ?? false;
-        fetchOptions.imageMaxCount =
-          (a.imageMaxCount as number | undefined) ?? fetchOptions.imageMaxCount;
-        fetchOptions.imageMaxHeight =
-          (a.imageMaxHeight as number | undefined) ??
-          fetchOptions.imageMaxHeight;
-        fetchOptions.imageMaxWidth =
-          (a.imageMaxWidth as number | undefined) ?? fetchOptions.imageMaxWidth;
-        fetchOptions.imageQuality =
-          (a.imageQuality as number | undefined) ?? fetchOptions.imageQuality;
+    if (legacyMode) {
+      // Legacy defaults
+      fetchOptions.startIndex =
+        (a.startIndex as number | undefined) ?? fetchOptions.startIndex;
+      fetchOptions.maxLength =
+        (a.maxLength as number | undefined) ?? fetchOptions.maxLength;
+      fetchOptions.raw = a.raw ?? false;
+      fetchOptions.imageMaxCount =
+        (a.imageMaxCount as number | undefined) ?? fetchOptions.imageMaxCount;
+      fetchOptions.imageMaxHeight =
+        (a.imageMaxHeight as number | undefined) ?? fetchOptions.imageMaxHeight;
+      fetchOptions.imageMaxWidth =
+        (a.imageMaxWidth as number | undefined) ?? fetchOptions.imageMaxWidth;
+      fetchOptions.imageQuality =
+        (a.imageQuality as number | undefined) ?? fetchOptions.imageQuality;
+      fetchOptions.imageStartIndex =
+        (a.imageStartIndex as number | undefined) ??
+        fetchOptions.imageStartIndex;
+      fetchOptions.enableFetchImages = a.enableFetchImages ?? false;
+      fetchOptions.allowCrossOriginImages = a.allowCrossOriginImages ?? true;
+      fetchOptions.saveImages = a.saveImages ?? true; // keep previous default behavior
+      fetchOptions.returnBase64 = a.returnBase64 ?? false;
+      // In legacy mode we preserve prior implicit behavior: individual images saved when any saving occurs
+      fetchOptions.output =
+        fetchOptions.saveImages && fetchOptions.returnBase64
+          ? "both"
+          : fetchOptions.returnBase64
+            ? "base64"
+            : fetchOptions.saveImages
+              ? "file"
+              : undefined;
+      fetchOptions.layout = "merged"; // merged remains primary; individual saving handled inside legacy path
+    } else {
+      // New API mode
+      const imagesCfg = a.images;
+      const textCfg = a.text || {};
+      const securityCfg = a.security || {};
+
+      fetchOptions.startIndex = textCfg.startIndex ?? fetchOptions.startIndex;
+      fetchOptions.maxLength = textCfg.maxLength ?? fetchOptions.maxLength;
+      fetchOptions.raw = textCfg.raw ?? false;
+
+      // images: true | object | undefined (default true for new API?)
+      const imagesEnabled =
+        imagesCfg === undefined
+          ? false
+          : typeof imagesCfg === "boolean"
+            ? imagesCfg
+            : true;
+      fetchOptions.enableFetchImages = imagesEnabled;
+
+      if (imagesEnabled) {
+        const cfg = (
+          typeof imagesCfg === "object" && imagesCfg !== null
+            ? (imagesCfg as Record<string, unknown>)
+            : {}
+        ) as {
+          output?: "base64" | "file" | "both";
+          layout?: "merged" | "individual" | "both";
+          maxCount?: number;
+          startIndex?: number;
+          size?: { maxWidth?: number; maxHeight?: number; quality?: number };
+          originPolicy?: "cross-origin" | "same-origin";
+          saveDir?: string;
+        };
+        fetchOptions.imageMaxCount = cfg.maxCount ?? fetchOptions.imageMaxCount;
         fetchOptions.imageStartIndex =
-          (a.imageStartIndex as number | undefined) ??
-          fetchOptions.imageStartIndex;
-        fetchOptions.enableFetchImages = a.enableFetchImages ?? false;
-        fetchOptions.allowCrossOriginImages = a.allowCrossOriginImages ?? true;
-        fetchOptions.saveImages = a.saveImages ?? true; // keep previous default behavior
-        fetchOptions.returnBase64 = a.returnBase64 ?? false;
-        // In legacy mode we preserve prior implicit behavior: individual images saved when any saving occurs
-        fetchOptions.output =
-          fetchOptions.saveImages && fetchOptions.returnBase64
-            ? "both"
-            : fetchOptions.returnBase64
-              ? "base64"
-              : fetchOptions.saveImages
-                ? "file"
-                : undefined;
-        fetchOptions.layout = "merged"; // merged remains primary; individual saving handled inside legacy path
-      } else {
-        // New API mode
-        const imagesCfg = a.images;
-        const textCfg = a.text || {};
-        const securityCfg = a.security || {};
-
-        fetchOptions.startIndex = textCfg.startIndex ?? fetchOptions.startIndex;
-        fetchOptions.maxLength = textCfg.maxLength ?? fetchOptions.maxLength;
-        fetchOptions.raw = textCfg.raw ?? false;
-
-        // images: true | object | undefined (default true for new API?)
-        const imagesEnabled =
-          imagesCfg === undefined
-            ? false
-            : typeof imagesCfg === "boolean"
-              ? imagesCfg
-              : true;
-        fetchOptions.enableFetchImages = imagesEnabled;
-
-        if (imagesEnabled) {
-          const cfg = (
-            typeof imagesCfg === "object" && imagesCfg !== null
-              ? (imagesCfg as any)
-              : {}
-          ) as {
-            output?: "base64" | "file" | "both";
-            layout?: "merged" | "individual" | "both";
-            maxCount?: number;
-            startIndex?: number;
-            size?: { maxWidth?: number; maxHeight?: number; quality?: number };
-            originPolicy?: "cross-origin" | "same-origin";
-            saveDir?: string;
-          };
-          fetchOptions.imageMaxCount =
-            cfg.maxCount ?? fetchOptions.imageMaxCount;
-          fetchOptions.imageStartIndex =
-            cfg.startIndex ?? fetchOptions.imageStartIndex;
-          const size = cfg.size || {};
-          fetchOptions.imageMaxWidth =
-            size.maxWidth ?? fetchOptions.imageMaxWidth;
-          fetchOptions.imageMaxHeight =
-            size.maxHeight ?? fetchOptions.imageMaxHeight;
-          fetchOptions.imageQuality = size.quality ?? fetchOptions.imageQuality;
-          fetchOptions.allowCrossOriginImages =
-            (cfg.originPolicy ?? "cross-origin") === "cross-origin";
-          fetchOptions.saveImages =
-            (cfg.output ?? "base64") === "file" ||
-            (cfg.output ?? "base64") === "both";
-          fetchOptions.returnBase64 =
-            (cfg.output ?? "base64") === "base64" ||
-            (cfg.output ?? "base64") === "both";
-          fetchOptions.output = cfg.output ?? "base64";
-          fetchOptions.layout = cfg.layout ?? "merged";
-          // NOTE: saveDir (cfg.saveDir) is respected in save functions when implemented (future)
-        }
-        // security
-        a.ignoreRobotsTxt = securityCfg.ignoreRobotsTxt ?? false;
+          cfg.startIndex ?? fetchOptions.imageStartIndex;
+        const size = cfg.size || {};
+        fetchOptions.imageMaxWidth =
+          size.maxWidth ?? fetchOptions.imageMaxWidth;
+        fetchOptions.imageMaxHeight =
+          size.maxHeight ?? fetchOptions.imageMaxHeight;
+        fetchOptions.imageQuality = size.quality ?? fetchOptions.imageQuality;
+        fetchOptions.allowCrossOriginImages =
+          (cfg.originPolicy ?? "cross-origin") === "cross-origin";
+        fetchOptions.saveImages =
+          (cfg.output ?? "base64") === "file" ||
+          (cfg.output ?? "base64") === "both";
+        fetchOptions.returnBase64 =
+          (cfg.output ?? "base64") === "base64" ||
+          (cfg.output ?? "base64") === "both";
+        fetchOptions.output = cfg.output ?? "base64";
+        fetchOptions.layout = cfg.layout ?? "merged";
+        // NOTE: saveDir (cfg.saveDir) is respected in save functions when implemented (future)
       }
+      // security
+      a.ignoreRobotsTxt = securityCfg.ignoreRobotsTxt ?? false;
+    }
 
-      // robots.txt respect unless ignored
-      if (!a.ignoreRobotsTxt && !IGNORE_ROBOTS_TXT) {
-        await checkRobotsTxt(a.url, DEFAULT_USER_AGENT_AUTONOMOUS);
-      }
+    // robots.txt respect unless ignored
+    if (!a.ignoreRobotsTxt && !IGNORE_ROBOTS_TXT) {
+      await checkRobotsTxt(a.url, DEFAULT_USER_AGENT_AUTONOMOUS);
+    }
 
-      const { content, images, remainingContent, remainingImages, title } =
-        await fetchUrl(
-          a.url,
-          DEFAULT_USER_AGENT_AUTONOMOUS,
-          fetchOptions.raw ?? false,
-          fetchOptions
-        );
-
-      let finalContent = content.slice(
-        fetchOptions.startIndex,
-        fetchOptions.startIndex + fetchOptions.maxLength
+    const { content, images, remainingContent, remainingImages, title } =
+      await fetchUrl(
+        a.url,
+        DEFAULT_USER_AGENT_AUTONOMOUS,
+        fetchOptions.raw ?? false,
+        fetchOptions
       );
 
-      // 残りの情報を追加
-      const remainingInfo = [];
-      if (remainingContent > 0) {
-        remainingInfo.push(`${remainingContent} characters of text remaining`);
-      }
-      if (remainingImages > 0) {
-        remainingInfo.push(
-          `${remainingImages} more images available (${fetchOptions.imageStartIndex + images.length}/${fetchOptions.imageStartIndex + images.length + remainingImages} shown)`
-        );
-      }
+    let finalContent = content.slice(
+      fetchOptions.startIndex,
+      fetchOptions.startIndex + fetchOptions.maxLength
+    );
 
-      if (remainingInfo.length > 0) {
-        finalContent += `\n\n<e>Content truncated. ${remainingInfo.join(", ")}. Call the imageFetch tool with start_index=${
-          fetchOptions.startIndex + fetchOptions.maxLength
-        } and/or imageStartIndex=${fetchOptions.imageStartIndex + images.length} to get more content.</e>`;
-      }
+    // 残りの情報を追加
+    const remainingInfo = [];
+    if (remainingContent > 0) {
+      remainingInfo.push(`${remainingContent} characters of text remaining`);
+    }
+    if (remainingImages > 0) {
+      remainingInfo.push(
+        `${remainingImages} more images available (${fetchOptions.imageStartIndex + images.length}/${fetchOptions.imageStartIndex + images.length + remainingImages} shown)`
+      );
+    }
 
-      // MCP レスポンスの作成
-      const responseContent: MCPResponseContent[] = [
-        {
-          type: "text",
-          text: `Contents of ${parsed.data.url}${title ? `: ${title}` : ""}:\n${finalContent}`,
-        },
-      ];
+    if (remainingInfo.length > 0) {
+      finalContent += `\n\n<e>Content truncated. ${remainingInfo.join(", ")}. Call the imageFetch tool with start_index=${
+        fetchOptions.startIndex + fetchOptions.maxLength
+      } and/or imageStartIndex=${fetchOptions.imageStartIndex + images.length} to get more content.</e>`;
+    }
 
-      // 画像があれば追加（Base64データが存在する場合のみ）
-      for (const image of images) {
-        if (image.data) {
-          responseContent.push({
-            type: "image",
-            mimeType: image.mimeType,
-            data: image.data,
-          });
-        }
-      }
+    // MCP レスポンスの作成
+    const responseContent: MCPResponseContent[] = [
+      {
+        type: "text",
+        text: `Contents of ${parsed.data.url}${title ? `: ${title}` : ""}:\n${finalContent}`,
+      },
+    ];
 
-      // 保存されたファイルの情報があれば追加
-      const savedFiles = images.filter((img) => img.filePath);
-      if (savedFiles.length > 0) {
-        const fileInfoText = savedFiles
-          .map((img, index) => `Image ${index + 1} saved to: ${img.filePath}`)
-          .join("\n");
-
+    // 画像があれば追加（Base64データが存在する場合のみ）
+    for (const image of images) {
+      if (image.data) {
         responseContent.push({
-          type: "text",
-          text: `\n📁 Saved Images:\n${fileInfoText}`,
+          type: "image",
+          mimeType: image.mimeType,
+          data: image.data,
         });
       }
-
-      return {
-        content: responseContent,
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
-        isError: true,
-      };
     }
-  }
-);
 
-// Resources handlers
-const ListResourcesSchema = z.object({
-  method: z.literal("resources/list"),
-});
+    // 保存されたファイルの情報があれば追加
+    const savedFiles = images.filter((img) => img.filePath);
+    if (savedFiles.length > 0) {
+      const fileInfoText = savedFiles
+        .map((img, index) => `Image ${index + 1} saved to: ${img.filePath}`)
+        .join("\n");
 
-const ReadResourceSchema = z.object({
-  method: z.literal("resources/read"),
-  params: z.object({
-    uri: z.string(),
-  }),
-});
-
-server.setRequestHandler(
-  ListResourcesSchema,
-  async (_request: { method: "resources/list" }) => {
-    const resources = Array.from(imageResources.values()).map((resource) => ({
-      uri: resource.uri,
-      name: resource.name,
-      description: resource.description,
-      mimeType: resource.mimeType,
-    }));
+      responseContent.push({
+        type: "text",
+        text: `\n📁 Saved Images:\n${fileInfoText}`,
+      });
+    }
 
     return {
-      resources,
+      content: responseContent,
+    };
+  } catch (error) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+      isError: true,
     };
   }
-);
+});
 
-server.setRequestHandler(
-  ReadResourceSchema,
-  async (request: { method: "resources/read"; params: { uri: string } }) => {
-    const resource = imageResources.get(request.params.uri);
+// Resources handlers
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  const resources = Array.from(imageResources.values()).map((resource) => ({
+    uri: resource.uri,
+    name: resource.name,
+    description: resource.description,
+    mimeType: resource.mimeType,
+  }));
 
-    if (!resource) {
-      throw new Error(`Resource not found: ${request.params.uri}`);
-    }
+  return {
+    resources,
+  };
+});
 
-    try {
-      const fileData = await fs.readFile(resource.filePath);
-      const base64Data = fileData.toString("base64");
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const resource = imageResources.get(request.params.uri);
 
-      return {
-        contents: [
-          {
-            uri: resource.uri,
-            mimeType: resource.mimeType,
-            blob: base64Data,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new Error(`Failed to read resource file: ${error}`);
-    }
+  if (!resource) {
+    throw new Error(`Resource not found: ${request.params.uri}`);
   }
-);
+
+  try {
+    const fileData = await fs.readFile(resource.filePath);
+    const base64Data = fileData.toString("base64");
+
+    return {
+      contents: [
+        {
+          uri: resource.uri,
+          mimeType: resource.mimeType,
+          blob: base64Data,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to read resource file: ${error}`);
+  }
+});
 
 // Start server
 async function runServer() {
