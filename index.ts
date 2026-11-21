@@ -83,16 +83,23 @@ function isPrivateIPv4(ip: string): boolean {
   return false;
 }
 
-function isPrivateIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  return (
-    lower === "::" ||
-    lower === "::1" ||
-    lower.startsWith("fe80:") || // link-local
-    lower.startsWith("fc") || // fc00::/7 (fc/fd)
-    lower.startsWith("fd") ||
-    lower.startsWith("ff") // multicast
-  );
+const nonPublicIPv6 = new net.BlockList();
+nonPublicIPv6.addAddress("::", "ipv6"); // unspecified
+nonPublicIPv6.addAddress("::1", "ipv6"); // loopback
+nonPublicIPv6.addSubnet("::ffff:0:0", 96, "ipv6"); // IPv4-mapped addresses
+nonPublicIPv6.addSubnet("fe80::", 10, "ipv6"); // link-local
+nonPublicIPv6.addSubnet("fc00::", 7, "ipv6"); // unique local
+nonPublicIPv6.addSubnet("ff00::", 8, "ipv6"); // multicast
+
+function isPublicIp(ip: string): boolean {
+  switch (net.isIP(ip)) {
+    case 4:
+      return !isPrivateIPv4(ip);
+    case 6:
+      return !nonPublicIPv6.check(ip, "ipv6");
+    default:
+      return false;
+  }
 }
 
 function isNodeErrorWithCode(error: unknown): error is NodeJS.ErrnoException {
@@ -129,18 +136,15 @@ async function isSafeUrl(
   if (DISABLE_SSRF_GUARD) {
     return { ok: true, url: u };
   }
-  const hostname = u.hostname;
+  // URL.hostname retains square brackets for IPv6 address literals.
+  const hostname = u.hostname.replace(/^\[(.*)\]$/, "$1");
   if (!hostname) return { ok: false, reason: "Missing hostname" };
-  const isIp = net.isIP(hostname) !== 0;
-  if (isIp) {
-    if (net.isIP(hostname) === 4 && isPrivateIPv4(hostname)) {
-      return { ok: false, reason: "IPv4 address is private/reserved" };
-    }
-    if (net.isIP(hostname) === 6 && isPrivateIPv6(hostname)) {
-      return { ok: false, reason: "IPv6 address is private/reserved" };
+  if (net.isIP(hostname)) {
+    if (!isPublicIp(hostname)) {
+      return { ok: false, reason: "IP address is private/reserved" };
     }
   } else {
-    const lower = hostname.toLowerCase();
+    const lower = hostname.toLowerCase().replace(/\.$/, "");
     if (
       lower === "localhost" ||
       lower.endsWith(".localhost") ||
@@ -149,16 +153,14 @@ async function isSafeUrl(
       return { ok: false, reason: "Local hostnames are not allowed" };
     }
     const ips = await resolveAllIps(hostname);
-    for (const ip of ips) {
-      if (
-        (net.isIP(ip) === 4 && isPrivateIPv4(ip)) ||
-        (net.isIP(ip) === 6 && isPrivateIPv6(ip))
-      ) {
-        return {
-          ok: false,
-          reason: "Hostname resolves to private/reserved address",
-        };
-      }
+    if (ips.length === 0) {
+      return { ok: false, reason: "Hostname has no verified address" };
+    }
+    if (ips.some((ip) => !isPublicIp(ip))) {
+      return {
+        ok: false,
+        reason: "Hostname resolves to private/reserved address",
+      };
     }
   }
   return { ok: true, url: u };
@@ -188,7 +190,7 @@ function withTimeout<T>(
   });
 }
 
-async function safeFollowFetch(
+export async function safeFollowFetch(
   inputUrl: string,
   init: RequestInit = {},
   opts: { maxRedirects?: number; timeoutMs?: number } = {}
